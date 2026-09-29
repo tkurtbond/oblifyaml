@@ -84,7 +84,7 @@ The thick layer (`Fyaml`, `FyamlStreams`) uses plain `INTEGER`/`LONGINT`.
 Each test is its own main module in `test/` (`TestThin`,
 `TestParseErrors`, `TestQuickstart`, `TestNavigate`, `TestPath`,
 `TestLiveness`, `TestBuild`, `TestMutate`, `TestScalars`,
-`TestAnchors`, `TestLocation`), printing `ok   - <label>` / `FAIL - <label>` per check through the
+`TestAnchors`, `TestLocation`, `TestStreams`), printing `ok   - <label>` / `FAIL - <label>` per check through the
 shared `test/Check.Mod`, and ending with `All checks passed.` or
 `<N> check(s) failed.` A failing run exits 1, so `make test` fails. To
 judge a run, grep for `FAIL` or read the last line. **Adding a test
@@ -103,7 +103,7 @@ Keep it that way, and never end a test with `Platform.Exit(0)`.
 code, and a program can't catch its own halt. So each such case is a
 separate small main module, `test/Halt*.Mod` (`HaltClosed`,
 `HaltKind`, `HaltIndex`, `HaltStale`, `HaltAttach`, `HaltAttached`,
-`HaltTyped`, `HaltResolved`), listed in the Makefile's `HALTTESTS` as
+`HaltTyped`, `HaltResolved`, `HaltStream`), listed in the Makefile's `HALTTESTS` as
 `name:status`. `make test` fails unless each one exits with exactly
 that status. voc prints `Assertion failure. ASSERT code N.` and exits
 with `N`, and a method call on a NIL pointer prints `NIL access.` and
@@ -173,7 +173,11 @@ which may keep pointing into it. See PLAN.md, "Buffer lifetime".
   emit, build and mutate (Phase 2); typed scalar accessors and
   mapping fields (Phase 3); parse options, `Resolve`, aliases, tags,
   styles and locations (Phase 4).
-- `src/FyamlStreams.Mod` (Phase 5): multi-document streams.
+- `src/FyamlStreams.Mod`: multi-document streams (Phase 5). It
+  builds `Fyaml.Document`s through `Fyaml`'s exported "For
+  FyamlStreams" hooks (`Adopt`, `DiagErrors`, `Unreadable`), which
+  exist only because Oberon has no friend modules; keep other code
+  off them.
 - `Makefile`: build and test; see Build above.
 - `test/`: one main module per concern, plus `Check.Mod` and the YAML
   fixtures.

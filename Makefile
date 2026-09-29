@@ -19,14 +19,14 @@ export LDLIBS := $(shell pkg-config --libs libfyaml)
 BUILD := build
 
 # Library modules, in import order.
-LIBMODS := FyThin Fyaml
+LIBMODS := FyThin Fyaml FyamlStreams
 # Test support modules, in import order.
 TESTSUPPORT := Check
 # Test programs (test/<name>.Mod, each a main module).
-TESTS := TestThin TestParseErrors TestQuickstart TestNavigate TestPath TestLiveness TestBuild TestMutate TestScalars TestAnchors TestLocation
+TESTS := TestThin TestParseErrors TestQuickstart TestNavigate TestPath TestLiveness TestBuild TestMutate TestScalars TestAnchors TestLocation TestStreams
 # Programs that must halt (test/<name>.Mod), as name:required-exit-status;
 # the status is one of Fyaml's Assert* codes.
-HALTTESTS := HaltClosed:61 HaltKind:62 HaltIndex:63 HaltStale:61 HaltAttach:64 HaltAttached:64 HaltTyped:62 HaltResolved:61
+HALTTESTS := HaltClosed:61 HaltKind:62 HaltIndex:63 HaltStale:61 HaltAttach:64 HaltAttached:64 HaltTyped:62 HaltResolved:61 HaltStream:61
 
 LIBOBJS  := $(LIBMODS:%=$(BUILD)/%.o)
 SUPPOBJS := $(TESTSUPPORT:%=$(BUILD)/%.o)
@@ -56,6 +56,7 @@ $(BUILD)/%.o: test/%.Mod | $(BUILD)
 # between library/support modules, e.g.
 #   $(BUILD)/Fyaml.o: $(BUILD)/FyThin.o
 $(BUILD)/Fyaml.o: $(BUILD)/FyThin.o
+$(BUILD)/FyamlStreams.o: $(BUILD)/Fyaml.o $(BUILD)/FyThin.o
 $(SUPPOBJS): $(LIBOBJS)
 
 # Test programs: main modules (-m); voc links the imported modules'

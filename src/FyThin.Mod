@@ -36,6 +36,7 @@ TYPE
   NodePair* = SYSTEM.ADDRESS;  (* struct fy_node_pair* *)
   Diag* = SYSTEM.ADDRESS;      (* struct fy_diag* *)
   DiagError* = SYSTEM.ADDRESS; (* struct fy_diag_error* *)
+  Parser* = SYSTEM.ADDRESS;    (* struct fy_parser* *)
 
 PROCEDURE -AincludeFyaml '#include <libfyaml.h>';
 PROCEDURE -AincludeStdlib '#include <stdlib.h>';
@@ -77,7 +78,58 @@ PROCEDURE DocumentDestroy*(fyd: Document);
 BEGIN documentDestroy(fyd)
 END DocumentDestroy;
 
-(* 0 for an empty document. *)
+(* ---- Streaming parser ---- *)
+
+(* fy_parser_create copies the config (fy_parse_setup: fyp->cfg =
+   *cfg), so a compound literal is enough here. *)
+PROCEDURE -parserCreate(resolve: BOOLEAN; diag: Diag): Parser
+  "(ADDRESS)fy_parser_create(&(struct fy_parse_cfg){ .flags = (resolve) ? FYPCF_RESOLVE_DOCUMENT : 0, .diag = (struct fy_diag*)diag })";
+PROCEDURE -parserSetString(fyp: Parser; str, len: SYSTEM.ADDRESS): SYSTEM.INT32
+  "(INT32)fy_parser_set_string((struct fy_parser*)fyp, (const char*)str, (size_t)len)";
+PROCEDURE -parserSetInputFile(fyp: Parser; file: SYSTEM.ADDRESS): SYSTEM.INT32
+  "(INT32)fy_parser_set_input_file((struct fy_parser*)fyp, (const char*)file)";
+PROCEDURE -parseLoadDocument(fyp: Parser): Document
+  "(ADDRESS)fy_parse_load_document((struct fy_parser*)fyp)";
+PROCEDURE -parserDestroy(fyp: Parser) "fy_parser_destroy((struct fy_parser*)fyp)";
+PROCEDURE -diagGotError(diag: Diag): BOOLEAN "(BOOLEAN)fy_diag_got_error((struct fy_diag*)diag)";
+
+(* A parser for a stream of "---"-separated documents; 0 on failure. *)
+PROCEDURE ParserCreate*(resolve: BOOLEAN; diag: Diag): Parser;
+BEGIN RETURN parserCreate(resolve, diag)
+END ParserCreate;
+
+(* Not copied (an fyit_memory input): the len bytes at str must stay
+   valid until the parser AND every document loaded from it are
+   destroyed. 0 on success. *)
+PROCEDURE ParserSetString*(fyp: Parser; str, len: SYSTEM.ADDRESS): SYSTEM.INT32;
+BEGIN RETURN parserSetString(fyp, str, len)
+END ParserSetString;
+
+(* file: a 0X-terminated path that must stay valid while the parser
+   is in use -- libfyaml opens the file lazily (alibfyaml found this
+   as a use-after-free). Documents loaded from it don't need it
+   (confirmed live under valgrind). 0 on success. *)
+PROCEDURE ParserSetInputFile*(fyp: Parser; file: SYSTEM.ADDRESS): SYSTEM.INT32;
+BEGIN RETURN parserSetInputFile(fyp, file)
+END ParserSetInputFile;
+
+(* The next document, or 0 at the end or on an error: DiagGotError
+   tells them apart. After an error every later call returns 0 too;
+   libfyaml can't resync to the documents after a malformed one
+   (confirmed live; alibfyaml found even fy_parser_reset doesn't). *)
+PROCEDURE ParseLoadDocument*(fyp: Parser): Document;
+BEGIN RETURN parseLoadDocument(fyp)
+END ParseLoadDocument;
+
+PROCEDURE ParserDestroy*(fyp: Parser);
+BEGIN parserDestroy(fyp)
+END ParserDestroy;
+
+(* TRUE once an error was reported to diag; sticky. *)
+PROCEDURE DiagGotError*(diag: Diag): BOOLEAN;
+BEGIN RETURN diagGotError(diag)
+END DiagGotError;
+
 (* ---- Resolving ---- *)
 
 PROCEDURE -documentResolve(fyd: Document): SYSTEM.INT32
@@ -101,6 +153,7 @@ PROCEDURE DocumentSetDiag*(fyd: Document; diag: Diag): SYSTEM.INT32;
 BEGIN RETURN documentSetDiag(fyd, diag)
 END DocumentSetDiag;
 
+(* 0 for an empty document. *)
 PROCEDURE DocumentRoot*(fyd: Document): Node;
 BEGIN RETURN documentRoot(fyd)
 END DocumentRoot;

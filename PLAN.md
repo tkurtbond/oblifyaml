@@ -607,12 +607,46 @@ valgrind, with findings written into this file.
      scalar has none here, where alibfyaml reports (1, 1).
    - **Oberon comments nest**: `(*name)` inside a comment opened a
      new one (`err 5 comment not closed`).
-5. **Streams.** `FyamlStreams`: `OpenString`/`OpenFile`,
-   `HasNext`/`Next` with one-ahead read-ahead, and a mid-stream parse
-   error reported as an error rather than a clean end. Swap in a fresh
-   diag after an error, and treat the stream as exhausted once an
-   error has occurred (both alibfyaml findings). Check a document
-   outliving its stream. Port `TestStreams`.
+5. **`[done]` Streams.** `FyamlStreams.Stream`:
+   `OpenString`/`OpenFile` and the `…With(…, options, err)` forms
+   (the same `SET` as `Fyaml.ParseStringWith`), `HasNext(VAR err)`
+   with a one-document read-ahead, `Next(VAR err)`, `Close`, `IsOpen`,
+   a GC finalizer, and `openStreams-`. `Next` returns NIL at the end
+   (err NIL) or on a malformed document (a `ParseError`), so a loop
+   can use `Next` alone; alibfyaml's `Next` past the end is a
+   `Program_Error`. An unopenable file is a `FileError` from
+   `OpenFile`. Each document is an ordinary `Fyaml.Document`, labelled
+   with the stream's file name or `(string-in-memory)` for errors.
+   Tests: `TestStreams` (27 checks), alibfyaml's cases on its
+   `streams.yaml` plus finalization, documents outliving closed and
+   collected streams, `NoResolve`, and exact error text; halt test
+   `HaltStream` (61). All pass and are clean under valgrind. Controls:
+   not freeing the read-ahead document at `Close` showed as
+   `definitely lost: 160 bytes`, and not sharing the text buffer with
+   documents made the outlives-its-stream check fail.
+
+   Found while doing it, confirmed live:
+   - **Oberon has no friend modules**, so `Fyaml` exports three hooks
+     for `FyamlStreams`, in a section saying other clients shouldn't
+     use them: `Adopt` (wrap a loaded document handle), `DiagErrors`
+     and `Unreadable` (build its errors); plus the constant
+     `stringName`.
+   - **A `finished` flag replaces alibfyaml's diag swap.** After an
+     error `fy_parse_load_document` only returns NULL (no resync), and
+     `fy_diag_got_error` stays set. alibfyaml swapped in a fresh diag
+     so later calls wouldn't repeat the stale error; here the stream
+     just stops calling libfyaml once it has hit the end or an error.
+   - `fy_parser_create` copies its config (`fyp->cfg = *cfg`), so the
+     config is a compound literal, as for single documents.
+     `fy_parser_set_string` doesn't copy its input (`fyit_memory`), so
+     the stream copies the text and every document shares that copy.
+     A document from a file stream needs neither the parser nor the
+     path once loaded (valgrind), but the parser needs the path while
+     in use (alibfyaml).
+   - `FYPCF_RESOLVE_DOCUMENT` works through the parser config: a
+     stream resolves each document as it is loaded.
+   - An unterminated flow sequence is reported at the start of the
+     next line (`(string-in-memory):5:1`), not where it opened.
 6. **Hardening and docs.** Benchmarks like alibfyaml's `bench/`
    (wide document, many documents) to measure the per-navigation
    `Node` allocation. A README with a usage example, and example

@@ -75,7 +75,7 @@ CONST
   AssertIndex* = 63;   (* index out of range *)
   AssertAttach* = 64;  (* node already attached, or from another document *)
 
-  stringName = "(string-in-memory)";  (* file name reported for ParseString input *)
+  stringName* = "(string-in-memory)";  (* file name reported for string input *)
 
 TYPE
   String* = POINTER TO ARRAY OF CHAR;
@@ -312,6 +312,46 @@ BEGIN
   RETURN d
 END Build;
 
+(* ---- For FyamlStreams ----
+
+   Exported only because Oberon has no friend modules: these pass raw
+   libfyaml handles across. Other clients should not call them. *)
+
+(* NIL if the file at path (0X-terminated) opens for reading, else a
+   FileError with the OS reason. libfyaml reports an unopenable file
+   only on stderr and collects nothing (confirmed live). *)
+PROCEDURE Unreadable*(path: String): Error;
+  VAR e: INTEGER; reason: String;
+BEGIN
+  e := FyThin.OpenErrno(SYSTEM.ADR(path[0]));
+  IF e = 0 THEN RETURN NIL END;
+  reason := FromCString(FyThin.Strerror(e));
+  RETURN NewError(FileError, path, reason^)
+END Unreadable;
+
+(* Takes ownership of h, a document loaded by a streaming parser:
+   Close or the GC finalizer destroys it. buffer is the stream's
+   text, which h's scalars span into (NIL for a file stream); name
+   labels errors. *)
+PROCEDURE Adopt*(h: FyThin.Document; buffer, name: String): Document;
+  VAR d: Document;
+BEGIN
+  ASSERT(h # 0);
+  d := NewDoc(h, buffer); d.name := name;
+  RETURN d
+END Adopt;
+
+(* The errors collected in diag, as one ParseError. fromString reports
+   stringName instead of libfyaml's synthetic "<memory-@...>" label. *)
+PROCEDURE DiagErrors*(diag: FyThin.Diag; fromString: BOOLEAN; name: String): Error;
+BEGIN
+  IF fromString THEN RETURN Collected(ParseError, diag, stringName, name, "document failed to parse")
+  ELSE RETURN Collected(ParseError, diag, "", name, "document failed to parse")
+  END
+END DiagErrors;
+
+(* ---- Parsing ---- *)
+
 (* Parses text (up to its first 0X) as one YAML document, with
    options (a SET of NoResolve; {} for none). Unless NoResolve is
    given, anchors, aliases and merge keys are resolved, and a cyclic
@@ -334,15 +374,11 @@ END ParseString;
    checked here first: libfyaml itself only prints "[ERR]: failed to
    open" on stderr and collects nothing (confirmed live). *)
 PROCEDURE ParseFileWith*(path: ARRAY OF CHAR; options: SET; VAR err: Error): Document;
-  VAR p: String; e: INTEGER; reason: String;
+  VAR p: String;
 BEGIN
   p := FromChars(path);
-  e := FyThin.OpenErrno(SYSTEM.ADR(p[0]));
-  IF e # 0 THEN
-    reason := FromCString(FyThin.Strerror(e));
-    err := NewError(FileError, p, reason^);
-    RETURN NIL
-  END;
+  err := Unreadable(p);
+  IF err # NIL THEN RETURN NIL END;
   RETURN Build(NIL, 0, p, "", p, options, err)
 END ParseFileWith;
 
