@@ -1,0 +1,11 @@
+# Test data for TestAnchors (Style) and TestLocation: one node per style.
+p: plain
+s: 'sq'
+d: "dq"
+l: |
+  lit
+f: >
+  fold
+q: [1]
+m:
+  k: v

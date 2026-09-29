@@ -83,7 +83,8 @@ The thick layer (`Fyaml`, `FyamlStreams`) uses plain `INTEGER`/`LONGINT`.
 
 Each test is its own main module in `test/` (`TestThin`,
 `TestParseErrors`, `TestQuickstart`, `TestNavigate`, `TestPath`,
-`TestLiveness`, `TestBuild`, `TestMutate`, `TestScalars`), printing `ok   - <label>` / `FAIL - <label>` per check through the
+`TestLiveness`, `TestBuild`, `TestMutate`, `TestScalars`,
+`TestAnchors`, `TestLocation`), printing `ok   - <label>` / `FAIL - <label>` per check through the
 shared `test/Check.Mod`, and ending with `All checks passed.` or
 `<N> check(s) failed.` A failing run exits 1, so `make test` fails. To
 judge a run, grep for `FAIL` or read the last line. **Adding a test
@@ -102,7 +103,7 @@ Keep it that way, and never end a test with `Platform.Exit(0)`.
 code, and a program can't catch its own halt. So each such case is a
 separate small main module, `test/Halt*.Mod` (`HaltClosed`,
 `HaltKind`, `HaltIndex`, `HaltStale`, `HaltAttach`, `HaltAttached`,
-`HaltTyped`), listed in the Makefile's `HALTTESTS` as
+`HaltTyped`, `HaltResolved`), listed in the Makefile's `HALTTESTS` as
 `name:status`. `make test` fails unless each one exits with exactly
 that status. voc prints `Assertion failure. ASSERT code N.` and exits
 with `N`, and a method call on a NIL pointer prints `NIL access.` and
@@ -113,8 +114,9 @@ a condition that is false only at run time.
 Expected stderr noise: libfyaml prints some failures itself,
 bypassing the collected diagnostics. `ParseFile` checks for an
 unopenable file first, so that case is quiet, but a directory given as
-a file still prints `[ERR]: fy_parse_load_document() failed`. That
-isn't a test failure.
+a file still prints `[ERR]: fy_parse_load_document() failed`, and so
+does a cyclic reference found while parsing with resolve on
+(`TestAnchors`). Neither is a test failure.
 
 ### Valgrind: necessary, but NOT sufficient here
 
@@ -169,7 +171,8 @@ which may keep pointing into it. See PLAN.md, "Buffer lifetime".
   policy.
 - `src/Fyaml.Mod`: `Document`, `Node`, `Error`, iterators (Phase 1);
   emit, build and mutate (Phase 2); typed scalar accessors and
-  mapping fields (Phase 3).
+  mapping fields (Phase 3); parse options, `Resolve`, aliases, tags,
+  styles and locations (Phase 4).
 - `src/FyamlStreams.Mod` (Phase 5): multi-document streams.
 - `Makefile`: build and test; see Build above.
 - `test/`: one main module per concern, plus `Check.Mod` and the YAML
@@ -195,6 +198,9 @@ which may keep pointing into it. See PLAN.md, "Buffer lifetime".
   (`err 41 END missing`, pointing at the comment line). Write "and
   friends" rather than a C wildcard ending in `*` before a `)`.
   (Inside a code procedure's C *string*, `(struct fy_node*)` is fine.)
+- **`(*` inside a comment opens a nested one** (Oberon comments
+  nest), so text like "an alias (*name)" swallows the rest of the
+  module (`err 5 comment not closed`). Quote it: `("*name")`.
 - **C is bound with "code procedures"**: `PROCEDURE -name(params): T
   "C expression";`. voc emits these as C *macros*, not functions, and
   a header is pulled in with `PROCEDURE -Aname '#include <libfyaml.h>';`
@@ -268,8 +274,8 @@ which may keep pointing into it. See PLAN.md, "Buffer lifetime".
   itself can consume or invalidate handles; `fy_document_insert_at`
   always unrefs its node, whatever the outcome, and `fy_node_insert`/
   `fy_document_set_root` free the nodes they replace. That's why
-  `InsertAt` and a replacing `SetRoot` bump the document's generation
-  count and so kill every earlier Node (see PLAN.md, "Node
+  `InsertAt`, `Resolve` and a replacing `SetRoot` bump the document's
+  generation count and so kill every earlier Node (see PLAN.md, "Node
   validity"); a new mutating call that can free nodes must do the
   same. A node made by `Create*` must go through the orphan list
   (`AddOrphan`/`DropOrphan`), since `fy_document_destroy` doesn't

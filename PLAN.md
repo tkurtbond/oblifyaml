@@ -242,6 +242,13 @@ in Phase 2:
 - `fy_node_insert` replaces a scalar target, merges a mapping into a
   mapping (new keys added, equal keys' values replaced and freed, the
   rest kept), and appends a sequence's items to a sequence.
+- `fy_document_resolve` turns each alias node into a copy of its
+  target in place (`fy_node_copy_to_scalar`), but frees every
+  merge-key pair (`fy_node_pair_detach_and_free`): a node taken on a
+  `<<` value and read after resolving is an invalid read under
+  valgrind (Phase 4). So `Resolve` bumps the generation count too.
+  alibfyaml's test keeps using a Node taken before `Resolve`; here it
+  must be taken again.
 - `fy_document_set_root` frees the previous root tree and refuses a
   node that is already attached.
 - `fy_node_mapping_append` refuses a duplicate key, an attached node,
@@ -560,12 +567,46 @@ valgrind, with findings written into this file.
    - `fy_node_is_null` is TRUE for an empty plain scalar, FALSE for
      `''`, `~` and `'null'`; a mapping or sequence has no scalar token
      (so no location); `fy_token_start_mark` is 0-based.
-4. **Anchors, tags, location.** A `resolve` parse option (default
-   TRUE, as alibfyaml decided), `Resolve(doc, VAR err)`, `IsAlias`,
-   `Tag`, `Style`, `HasLocation`/`Location`, and the alias-safe
-   `IsNullValue`. Port `TestAnchors` (including alibfyaml's note that
-   the merge-key cycle leaks a small amount *inside libfyaml*, which
-   is not ours to fix) and `TestLocation`.
+4. **`[done]` Anchors, tags, location.** Parse options as a `SET`:
+   `ParseStringWith`/`ParseFileWith(…, options, err)`, with
+   `NoResolve` the only element so far (Oberon has no default
+   parameters, and a `SET` leaves room for Phase 5's options);
+   `ParseString`/`ParseFile` are the `{}` forms, with resolve on as
+   alibfyaml decided. `(d) Resolve(VAR err): BOOLEAN` (new kind
+   `ResolveError`; it kills earlier Nodes, see Consumption
+   contracts), `IsAlias`, `Tag` (`""` for none), `Style` (constants
+   `StyleFlow` … `StyleAlias`, mapped from the header's enum at run
+   time rather than retyped), and `Location(VAR line, column):
+   BOOLEAN`/`HasLocation`. The alias-safe `IsNullValue` came in
+   Phase 3. Tests: `TestAnchors` (30 checks) and `TestLocation` (14)
+   on alibfyaml's `anchors.yaml`, `anchors_cycle.yaml` and
+   `location.yaml` plus a new `styles.yaml`; halt test
+   `HaltResolved` (61). All pass and are clean under valgrind.
+   Removing `Resolve`'s generation bump made one check and
+   `HaltResolved` fail.
+
+   Found while doing it, confirmed live:
+   - **`Resolve` frees merge-key pairs** (above), so it must kill
+     earlier Nodes.
+   - **Resolve errors need a fresh diag.** A document keeps a
+     reference to its parse diag, which `DiagDestroy` has already
+     silenced (`fy_diag_destroy` sets `destroyed` and unrefs).
+     `Resolve` gives the document a new collecting diag with
+     `fy_document_set_diag`, reads its errors, then destroys (silences)
+     it the same way. The cycle fixture gives
+     `anchors_cycle.yaml:2:8: error: cyclic reference detected`.
+   - **No leak on the cycle.** alibfyaml saw a small leak inside
+     libfyaml's diag reporting when resolving `anchors_cycle.yaml`;
+     with a collecting diag valgrind shows none, in C and here.
+   - With resolve on, the same cycle is a `ParseError` at parse time,
+     and libfyaml also prints `[ERR]: fy_parse_load_document()
+     failed` on stderr.
+   - Locations: an alias is located at its name, after the `*`; a
+     quoted scalar after its opening quote; a block scalar at its
+     first content line; a mapping or sequence has none. A created
+     scalar has none here, where alibfyaml reports (1, 1).
+   - **Oberon comments nest**: `(*name)` inside a comment opened a
+     new one (`err 5 comment not closed`).
 5. **Streams.** `FyamlStreams`: `OpenString`/`OpenFile`,
    `HasNext`/`Next` with one-ahead read-ahead, and a mid-stream parse
    error reported as an error rather than a clean end. Swap in a fresh

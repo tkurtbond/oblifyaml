@@ -11,9 +11,9 @@ MODULE Fyaml; (* Oberon-2 binding to libfyaml: documents, nodes, errors *)
 
    Nodes. A Node is a small heap object holding its Document, so the
    GC can never destroy a document that a reachable Node still uses.
-   A Node dies when its Document is closed, and ALSO when InsertAt
-   (or SetRoot replacing an existing root) is called on its Document:
-   libfyaml frees the nodes those calls replace, and this binding
+   A Node dies when its Document is closed, and ALSO when InsertAt,
+   Resolve, or SetRoot replacing an existing root is called on its
+   Document: libfyaml frees the nodes those calls replace, and this binding
    can't tell which ones, so it invalidates every Node taken from the
    document before the call (a per-document generation count). Get
    Nodes again from Root/ByPath afterwards. Calling a method of a dead
@@ -55,6 +55,16 @@ CONST
   DuplicateKey* = 5; (* AppendPair: the mapping already has an equal key *)
   MissingKey* = 6;   (* Required and the ...Field accessors: no such key *)
   DataError* = 7;    (* typed accessors: not a scalar, malformed, or out of range *)
+  ResolveError* = 8; (* Resolve: e.g. a cyclic reference *)
+
+  (* Options for ParseStringWith/ParseFileWith, elements of a SET *)
+  NoResolve* = 0;    (* leave anchors, aliases and merge keys as written; see Resolve *)
+
+  (* Node styles, as returned by Style *)
+  StyleFlow* = 0; StyleBlock* = 1;  (* collections: [a] {k: v}, or indented *)
+  StylePlain* = 2; StyleSingleQuoted* = 3; StyleDoubleQuoted* = 4;
+  StyleLiteral* = 5; StyleFolded* = 6;  (* block scalars: | and > *)
+  StyleAlias* = 7;   (* an unresolved *alias *)
 
   (* Node kinds, as returned by Kind *)
   KindScalar* = 0; KindSequence* = 1; KindMapping* = 2;
@@ -190,11 +200,12 @@ END NewError;
    reports a synthetic "<memory-@...>" label (alibfyaml confirmed).
    name is the file named when nothing was collected: libfyaml reports
    some failures (e.g. a directory given as a file) only on stderr. *)
-PROCEDURE Collected(diag: FyThin.Diag; fileOverride: ARRAY OF CHAR; name: String): Error;
+PROCEDURE Collected(kind: INTEGER; diag: FyThin.Diag; fileOverride: ARRAY OF CHAR; name: String;
+                    fallback: ARRAY OF CHAR): Error;
   VAR err: Error; e: FyThin.DiagError; prev: SYSTEM.ADDRESS;
     msg, file, text: String; len: LONGINT; line, column: INTEGER;
 BEGIN
-  NEW(err); err.kind := ParseError; err.line := 0; err.column := 0; err.path := NIL;
+  NEW(err); err.kind := kind; err.line := 0; err.column := 0; err.path := NIL;
   msg := NIL; len := 0; prev := 0;
   LOOP
     e := FyThin.DiagErrorsIterate(diag, prev);
@@ -211,7 +222,7 @@ BEGIN
     Append(msg, len, ":"); AppendInt(msg, len, column);
     Append(msg, len, ": error: "); Append(msg, len, text^); Append(msg, len, 0AX)
   END;
-  IF msg = NIL THEN RETURN NewError(ParseError, name, "document failed to parse") END;
+  IF msg = NIL THEN RETURN NewError(kind, name, fallback) END;
   err.msg := msg;
   RETURN err
 END Collected;
@@ -282,7 +293,7 @@ END NewDoc;
    The diag is created and destroyed here, exactly once on every path
    (alibfyaml's Parse_Common double-free). *)
 PROCEDURE Build(buffer: String; len: SYSTEM.ADDRESS; path: String;
-                fileOverride: ARRAY OF CHAR; name: String; VAR err: Error): Document;
+                fileOverride: ARRAY OF CHAR; name: String; options: SET; VAR err: Error): Document;
   VAR diag: FyThin.Diag; h: FyThin.Document; d: Document;
 BEGIN
   err := NIL;
@@ -290,32 +301,39 @@ BEGIN
   ASSERT(diag # 0);  (* allocation failure: nothing sensible to return *)
   FyThin.DiagSetCollectErrors(diag, TRUE);
   IF buffer # NIL THEN
-    h := FyThin.DocumentBuildFromString(SYSTEM.ADR(buffer[0]), len, TRUE, diag)
+    h := FyThin.DocumentBuildFromString(SYSTEM.ADR(buffer[0]), len, ~(NoResolve IN options), diag)
   ELSE
-    h := FyThin.DocumentBuildFromFile(SYSTEM.ADR(path[0]), TRUE, diag)
+    h := FyThin.DocumentBuildFromFile(SYSTEM.ADR(path[0]), ~(NoResolve IN options), diag)
   END;
-  IF h = 0 THEN err := Collected(diag, fileOverride, name) END;
+  IF h = 0 THEN err := Collected(ParseError, diag, fileOverride, name, "document failed to parse") END;
   FyThin.DiagDestroy(diag);
   IF h = 0 THEN RETURN NIL END;
   d := NewDoc(h, buffer); d.name := name;
   RETURN d
 END Build;
 
-(* Parses text (up to its first 0X) as one YAML document. Anchors,
-   aliases, and merge keys are resolved. Returns NIL and sets err on a
-   parse error. text is copied: libfyaml doesn't copy its input, and
-   voc's copy of a value ARRAY OF CHAR dies when a procedure returns
+(* Parses text (up to its first 0X) as one YAML document, with
+   options (a SET of NoResolve; {} for none). Unless NoResolve is
+   given, anchors, aliases and merge keys are resolved, and a cyclic
+   reference is a ParseError. Returns NIL and sets err on a parse
+   error. text is copied: libfyaml doesn't copy its input, and voc's
+   copy of a value ARRAY OF CHAR dies when a procedure returns
    (PLAN.md, "Buffer lifetime"). Parses only the first of several
    "---" documents. *)
+PROCEDURE ParseStringWith*(text: ARRAY OF CHAR; options: SET; VAR err: Error): Document;
+BEGIN RETURN Build(FromChars(text), Length(text), NIL, stringName, FromChars(stringName), options, err)
+END ParseStringWith;
+
+(* ParseStringWith(text, {}, err): anchors resolved. *)
 PROCEDURE ParseString*(text: ARRAY OF CHAR; VAR err: Error): Document;
-BEGIN RETURN Build(FromChars(text), Length(text), NIL, stringName, FromChars(stringName), err)
+BEGIN RETURN ParseStringWith(text, {}, err)
 END ParseString;
 
-(* Parses the file at path as one YAML document, like ParseString.
+(* Parses the file at path as one YAML document, like ParseStringWith.
    A file that can't be opened gives a FileError with the OS reason,
    checked here first: libfyaml itself only prints "[ERR]: failed to
    open" on stderr and collects nothing (confirmed live). *)
-PROCEDURE ParseFile*(path: ARRAY OF CHAR; VAR err: Error): Document;
+PROCEDURE ParseFileWith*(path: ARRAY OF CHAR; options: SET; VAR err: Error): Document;
   VAR p: String; e: INTEGER; reason: String;
 BEGIN
   p := FromChars(path);
@@ -325,7 +343,12 @@ BEGIN
     err := NewError(FileError, p, reason^);
     RETURN NIL
   END;
-  RETURN Build(NIL, 0, p, "", p, err)
+  RETURN Build(NIL, 0, p, "", p, options, err)
+END ParseFileWith;
+
+(* ParseFileWith(path, {}, err): anchors resolved. *)
+PROCEDURE ParseFile*(path: ARRAY OF CHAR; VAR err: Error): Document;
+BEGIN RETURN ParseFileWith(path, {}, err)
 END ParseFile;
 
 (* Frees the document's tree now. Idempotent. Every Node from it
@@ -352,6 +375,36 @@ BEGIN
   ASSERT(d.handle # 0, AssertInvalid);
   RETURN NewNode(d, FyThin.DocumentRoot(d.handle))
 END Root;
+
+(* Resolves anchors, aliases and merge keys, for a document parsed
+   with NoResolve (or built): each alias becomes a copy of its
+   anchored node, and each "<<" merge key is replaced by the pairs it
+   merges. libfyaml frees the merge-key pairs, so, as with InsertAt,
+   every Node taken from d before the call is dead afterwards; get
+   them again from Root. FALSE and a ResolveError if it fails (e.g.
+   "cyclic reference detected"), which can leave d partly resolved. *)
+PROCEDURE (d: Document) Resolve*(VAR err: Error): BOOLEAN;
+  VAR diag: FyThin.Diag; rc: INTEGER; name: String;
+BEGIN
+  ASSERT(d.handle # 0, AssertInvalid);
+  err := NIL;
+  diag := FyThin.DiagCreate();
+  ASSERT(diag # 0);
+  FyThin.DiagSetCollectErrors(diag, TRUE);
+  ASSERT(FyThin.DocumentSetDiag(d.handle, diag) = 0);
+  rc := FyThin.DocumentResolve(d.handle);
+  INC(d.gen);
+  IF rc # 0 THEN
+    name := d.name; IF name = NIL THEN name := FromChars("(built document)") END;
+    IF d.buffer # NIL THEN  (* libfyaml's label for string input is synthetic *)
+      err := Collected(ResolveError, diag, stringName, name, "document failed to resolve")
+    ELSE
+      err := Collected(ResolveError, diag, "", name, "document failed to resolve")
+    END
+  END;
+  FyThin.DiagDestroy(diag);  (* d keeps a reference; this only silences it *)
+  RETURN rc = 0
+END Resolve;
 
 (* ---- Nodes ---- *)
 
@@ -909,6 +962,59 @@ BEGIN
   IF err = NIL THEN s := FromChars(default) END;
   RETURN err = NIL
 END StringFieldOr;
+
+(* ---- Aliases, tags, styles, locations ---- *)
+
+(* TRUE for an unresolved alias ("*name"), which exists only in a
+   document parsed with NoResolve and not yet resolved. An alias
+   counts as a scalar whose text is the anchor's name ("b" for *b). *)
+PROCEDURE (n: Node) IsAlias*(): BOOLEAN;
+BEGIN Live(n); RETURN FyThin.NodeIsAlias(n.handle)
+END IsAlias;
+
+(* The explicit tag, verbatim ("!mytag", "!!str"), or "" if n has
+   none. libfyaml doesn't resolve implicit tags. *)
+PROCEDURE (n: Node) Tag*(): String;
+  VAR p, len: SYSTEM.ADDRESS;
+BEGIN
+  Live(n);
+  p := FyThin.NodeGetTag(n.handle, len);
+  IF p = 0 THEN len := 0 END;
+  RETURN FromBytes(p, len)
+END Tag;
+
+(* How n is written: one of the Style* constants. *)
+PROCEDURE (n: Node) Style*(): INTEGER;
+  VAR s: INTEGER;
+BEGIN
+  Live(n);
+  s := FyThin.NodeGetStyle(n.handle);
+  IF s = FyThin.StyleFlow() THEN RETURN StyleFlow
+  ELSIF s = FyThin.StyleBlock() THEN RETURN StyleBlock
+  ELSIF s = FyThin.StylePlain() THEN RETURN StylePlain
+  ELSIF s = FyThin.StyleSingleQuoted() THEN RETURN StyleSingleQuoted
+  ELSIF s = FyThin.StyleDoubleQuoted() THEN RETURN StyleDoubleQuoted
+  ELSIF s = FyThin.StyleLiteral() THEN RETURN StyleLiteral
+  ELSIF s = FyThin.StyleFolded() THEN RETURN StyleFolded
+  ELSE ASSERT(s = FyThin.StyleAlias()); RETURN StyleAlias
+  END
+END Style;
+
+(* The 1-based line and column where scalar n's text starts in the
+   input; FALSE if n has no location. Only scalars (and aliases: the
+   name after "*") have one. A block scalar's (| or >) is where its
+   first content line starts. A scalar made by CreateScalar has none;
+   and because libfyaml gives it the same 0:0 mark as input's very
+   first byte, once CreateScalar has been called on a document a
+   parsed scalar at 1:1 reports none either. *)
+PROCEDURE (n: Node) Location*(VAR line, column: INTEGER): BOOLEAN;
+BEGIN Live(n); RETURN ScalarLocation(n.doc, n.handle, line, column)
+END Location;
+
+PROCEDURE (n: Node) HasLocation*(): BOOLEAN;
+  VAR line, column: INTEGER;
+BEGIN RETURN n.Location(line, column)
+END HasLocation;
 
 (* ---- Iteration ---- *)
 

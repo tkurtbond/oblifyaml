@@ -78,6 +78,29 @@ BEGIN documentDestroy(fyd)
 END DocumentDestroy;
 
 (* 0 for an empty document. *)
+(* ---- Resolving ---- *)
+
+PROCEDURE -documentResolve(fyd: Document): SYSTEM.INT32
+  "(INT32)fy_document_resolve((struct fy_document*)fyd)";
+PROCEDURE -documentSetDiag(fyd: Document; diag: Diag): SYSTEM.INT32
+  "(INT32)fy_document_set_diag((struct fy_document*)fyd, (struct fy_diag*)diag)";
+
+(* Resolves anchors, aliases and merge keys in place: an alias node
+   becomes a copy of its target (fy_node_copy_to_scalar), and each
+   merge-key pair is freed. 0 on success; errors go to the document's
+   diag, e.g. "cyclic reference detected" (confirmed live). *)
+PROCEDURE DocumentResolve*(fyd: Document): SYSTEM.INT32;
+BEGIN RETURN documentResolve(fyd)
+END DocumentResolve;
+
+(* Makes diag the document's diag; the document takes a reference, so
+   DiagDestroy on it afterwards only silences it (fy_diag_destroy
+   marks it destroyed and unrefs it). A parsed document keeps its
+   parse diag the same way, already silenced. *)
+PROCEDURE DocumentSetDiag*(fyd: Document; diag: Diag): SYSTEM.INT32;
+BEGIN RETURN documentSetDiag(fyd, diag)
+END DocumentSetDiag;
+
 PROCEDURE DocumentRoot*(fyd: Document): Node;
 BEGIN RETURN documentRoot(fyd)
 END DocumentRoot;
@@ -172,6 +195,39 @@ PROCEDURE -nodeIsPlain(fyn: Node): BOOLEAN "(BOOLEAN)(fy_node_get_style((struct 
 PROCEDURE NodeIsPlain*(fyn: Node): BOOLEAN;
 BEGIN RETURN nodeIsPlain(fyn)
 END NodeIsPlain;
+
+(* Tags and styles *)
+PROCEDURE -nodeGetTag(fyn: Node; lenp: SYSTEM.ADDRESS): SYSTEM.ADDRESS
+  "(ADDRESS)fy_node_get_tag((struct fy_node*)fyn, (size_t*)lenp)";
+PROCEDURE -nodeGetStyle(fyn: Node): SYSTEM.INT32 "(INT32)fy_node_get_style((struct fy_node*)fyn)";
+PROCEDURE -styleFlow(): SYSTEM.INT32 "(INT32)FYNS_FLOW";
+PROCEDURE -styleBlock(): SYSTEM.INT32 "(INT32)FYNS_BLOCK";
+PROCEDURE -stylePlain(): SYSTEM.INT32 "(INT32)FYNS_PLAIN";
+PROCEDURE -styleSingleQuoted(): SYSTEM.INT32 "(INT32)FYNS_SINGLE_QUOTED";
+PROCEDURE -styleDoubleQuoted(): SYSTEM.INT32 "(INT32)FYNS_DOUBLE_QUOTED";
+PROCEDURE -styleLiteral(): SYSTEM.INT32 "(INT32)FYNS_LITERAL";
+PROCEDURE -styleFolded(): SYSTEM.INT32 "(INT32)FYNS_FOLDED";
+PROCEDURE -styleAlias(): SYSTEM.INT32 "(INT32)FYNS_ALIAS";
+
+(* The explicit tag's text, verbatim ("!mytag"), not 0X-terminated;
+   0 if the node has none (confirmed live). *)
+PROCEDURE NodeGetTag*(fyn: Node; VAR len: SYSTEM.ADDRESS): SYSTEM.ADDRESS;
+BEGIN RETURN nodeGetTag(fyn, SYSTEM.ADR(len))
+END NodeGetTag;
+
+(* One of the Style* values below (enum fy_node_style). *)
+PROCEDURE NodeGetStyle*(fyn: Node): SYSTEM.INT32;
+BEGIN RETURN nodeGetStyle(fyn)
+END NodeGetStyle;
+
+PROCEDURE StyleFlow*(): SYSTEM.INT32; BEGIN RETURN styleFlow() END StyleFlow;
+PROCEDURE StyleBlock*(): SYSTEM.INT32; BEGIN RETURN styleBlock() END StyleBlock;
+PROCEDURE StylePlain*(): SYSTEM.INT32; BEGIN RETURN stylePlain() END StylePlain;
+PROCEDURE StyleSingleQuoted*(): SYSTEM.INT32; BEGIN RETURN styleSingleQuoted() END StyleSingleQuoted;
+PROCEDURE StyleDoubleQuoted*(): SYSTEM.INT32; BEGIN RETURN styleDoubleQuoted() END StyleDoubleQuoted;
+PROCEDURE StyleLiteral*(): SYSTEM.INT32; BEGIN RETURN styleLiteral() END StyleLiteral;
+PROCEDURE StyleFolded*(): SYSTEM.INT32; BEGIN RETURN styleFolded() END StyleFolded;
+PROCEDURE StyleAlias*(): SYSTEM.INT32; BEGIN RETURN styleAlias() END StyleAlias;
 
 PROCEDURE NodeIsAlias*(fyn: Node): BOOLEAN;
 BEGIN RETURN nodeIsAlias(fyn)

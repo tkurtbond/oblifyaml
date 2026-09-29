@@ -1,0 +1,9 @@
+base: &b
+  x: 1
+  y: 2
+derived:
+  <<: *b
+  z: 3
+same: *b
+tagged: !mytag hello
+untagged: plain
