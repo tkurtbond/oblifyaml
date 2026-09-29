@@ -23,10 +23,10 @@ LIBMODS := FyThin Fyaml
 # Test support modules, in import order.
 TESTSUPPORT := Check
 # Test programs (test/<name>.Mod, each a main module).
-TESTS := TestThin TestParseErrors TestQuickstart TestNavigate TestPath TestLiveness TestBuild TestMutate
+TESTS := TestThin TestParseErrors TestQuickstart TestNavigate TestPath TestLiveness TestBuild TestMutate TestScalars
 # Programs that must halt (test/<name>.Mod), as name:required-exit-status;
 # the status is one of Fyaml's Assert* codes.
-HALTTESTS := HaltClosed:61 HaltKind:62 HaltIndex:63 HaltStale:61 HaltAttach:64 HaltAttached:64
+HALTTESTS := HaltClosed:61 HaltKind:62 HaltIndex:63 HaltStale:61 HaltAttach:64 HaltAttached:64 HaltTyped:62
 
 LIBOBJS  := $(LIBMODS:%=$(BUILD)/%.o)
 SUPPOBJS := $(TESTSUPPORT:%=$(BUILD)/%.o)

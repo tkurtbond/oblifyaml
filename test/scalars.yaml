@@ -1,0 +1,69 @@
+# Test data for test_scalars.adb, exercising every typed scalar
+# accessor in Libfyaml.Nodes: valid values in each supported base/form,
+# a value that overflows Integer but fits Long_Integer/Long_Long_Integer,
+# a value that overflows Float but fits Long_Float, all six accepted
+# boolean spellings, a non-scalar value (to trigger the "not a scalar"
+# Data_Error path), and a value that isn't a valid number or boolean in
+# any form (to trigger the "malformed" Data_Error path).
+
+int_dec: 42
+int_neg: -7
+int_hex: 0x1A
+int_oct: 0o17
+int_zero: 0
+
+# "0b" binary and "_" digit separators are alibfyaml extensions, not
+# part of YAML 1.2 core schema -- see README.md.
+int_bin: 0b1010
+int_underscore: 1_000_000
+int_hex_underscore: 0xFF_FF
+
+# Exceeds Integer'Last (2_147_483_647) but fits Long_Integer and
+# Long_Long_Integer (both 64-bit on this platform).
+big_int: 5000000000
+
+float_val: 3.5
+float_exp: 1.5e2
+float_neg: -2.25
+float_underscore: 1_234.5_6
+
+# Exceeds Float'Last (~3.4e38, 32-bit) but fits Long_Float (~1.8e308,
+# 64-bit).
+float_overflow: 1.0e40
+
+bool_true: true
+bool_True: True
+bool_TRUE: TRUE
+bool_false: false
+bool_False: False
+bool_FALSE: FALSE
+
+name: widget
+
+# A mapping, not a scalar -- Integer_Value/Boolean_Value/etc. on this
+# key must raise Data_Error ("not a scalar value"), not treat it as
+# text.
+not_scalar:
+  a: 1
+
+# Present, but not a valid integer/float/boolean in any form.
+malformed: banana
+
+# Malformed digit-separator placement: leading, trailing, and doubled
+# underscores are all rejected (Ada's own numeral syntax -- which the
+# "_" extension deliberately follows -- requires a single underscore
+# strictly between two digits).
+bad_underscore_leading: _123
+bad_underscore_trailing: 123_
+bad_underscore_double: 1__2
+
+# "2" is not a valid binary digit.
+bad_binary: 0b102
+
+# A sign combined with a 0x/0o/0b prefix.
+int_hex_neg: -0x1A
+
+# Exceeds even Long_Long_Integer'Last / Long_Float'Last (both 64-bit),
+# so the widest accessor of each kind also has a Data_Error path.
+huge_int: 99999999999999999999999999999
+huge_float: 1.0e400

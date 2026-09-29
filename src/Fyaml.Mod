@@ -24,9 +24,14 @@ MODULE Fyaml; (* Oberon-2 binding to libfyaml: documents, nodes, errors *)
    unattached nodes; Append, AppendPair and SetRoot attach them. A node
    can be attached only once, and only within its own document.
 
-   Errors. Bad input and missing files are ordinary results: calls
-   that can fail on them return NIL/FALSE and hand back an Error in a
-   VAR parameter (NIL on success). Programmer errors -- a closed
+   Typed values. LongIntValue, IntegerValue, RealValue, LongRealValue
+   and BooleanValue resolve a scalar's text as YAML 1.2's core schema
+   does; the ...Field/...FieldOr forms look a key up in a mapping
+   first, with or without a default. See "Typed scalars" below.
+
+   Errors. Bad input, missing files, missing keys and malformed values
+   are ordinary results: calls that can fail on them return NIL/FALSE
+   and hand back an Error in a VAR parameter (NIL on success). Programmer errors -- a closed
    document, a node of the wrong kind, an index out of range -- are
    ASSERT failures that halt with one of the Assert* codes below.
    Calling a method on a NIL Node halts with voc's own "NIL access".
@@ -48,6 +53,8 @@ CONST
   EmitError* = 3;    (* ToYAML/ToFile: libfyaml failed to emit *)
   PathError* = 4;    (* InsertAt: no node at the path, or it can't take the insert *)
   DuplicateKey* = 5; (* AppendPair: the mapping already has an equal key *)
+  MissingKey* = 6;   (* Required and the ...Field accessors: no such key *)
+  DataError* = 7;    (* typed accessors: not a scalar, malformed, or out of range *)
 
   (* Node kinds, as returned by Kind *)
   KindScalar* = 0; KindSequence* = 1; KindMapping* = 2;
@@ -66,9 +73,10 @@ TYPE
 
   Error* = POINTER TO ErrorDesc;
   ErrorDesc* = RECORD
-    kind-: INTEGER;           (* ParseError, FileError, EmitError, PathError, DuplicateKey *)
+    kind-: INTEGER;           (* one of the error kinds above *)
     file-: String;            (* file of the first error; never NIL *)
     line-, column-: INTEGER;  (* of the first error; 1-based, 0 = unknown *)
+    path-: String;            (* the node concerned, in ByPath syntax, or NIL *)
     msg-: String              (* every error, one "file:line:column: error: text" line each *)
   END;
 
@@ -77,6 +85,8 @@ TYPE
     handle: FyThin.Document;  (* 0 once closed *)
     buffer: String;           (* ParseString input: libfyaml's scalars span into it *)
     gen: LONGINT;             (* bumped by InsertAt/SetRoot: older Nodes are dead *)
+    name: String;             (* file name for errors: ParseFile's path, or stringName; NIL if built *)
+    created: BOOLEAN;         (* CreateScalar was called: a 0:0 location may be a created scalar's *)
     (* Nodes made by Create* and not attached yet: libfyaml frees only
        the tree when a document is destroyed, so Close frees these. *)
     orphans: Handles;
@@ -168,7 +178,7 @@ END AppendInt;
 PROCEDURE NewError(kind: INTEGER; file: String; text: ARRAY OF CHAR): Error;
   VAR err: Error; len: LONGINT;
 BEGIN
-  NEW(err); err.kind := kind; err.file := file; err.line := 0; err.column := 0;
+  NEW(err); err.kind := kind; err.file := file; err.line := 0; err.column := 0; err.path := NIL;
   len := 0;
   Append(err.msg, len, file^); Append(err.msg, len, ": error: ");
   Append(err.msg, len, text); Append(err.msg, len, 0AX);
@@ -184,7 +194,7 @@ PROCEDURE Collected(diag: FyThin.Diag; fileOverride: ARRAY OF CHAR; name: String
   VAR err: Error; e: FyThin.DiagError; prev: SYSTEM.ADDRESS;
     msg, file, text: String; len: LONGINT; line, column: INTEGER;
 BEGIN
-  NEW(err); err.kind := ParseError; err.line := 0; err.column := 0;
+  NEW(err); err.kind := ParseError; err.line := 0; err.column := 0; err.path := NIL;
   msg := NIL; len := 0; prev := 0;
   LOOP
     e := FyThin.DiagErrorsIterate(diag, prev);
@@ -261,6 +271,7 @@ PROCEDURE NewDoc(h: FyThin.Document; buffer: String): Document;
   VAR d: Document;
 BEGIN
   NEW(d); d.handle := h; d.buffer := buffer; d.gen := 0; d.orphans := NIL; d.norphans := 0;
+  d.name := NIL; d.created := FALSE;
   INC(openDocuments);
   Heap.RegisterFinalizer(d, FinalizeDocument);
   RETURN d
@@ -286,7 +297,8 @@ BEGIN
   IF h = 0 THEN err := Collected(diag, fileOverride, name) END;
   FyThin.DiagDestroy(diag);
   IF h = 0 THEN RETURN NIL END;
-  RETURN NewDoc(h, buffer)
+  d := NewDoc(h, buffer); d.name := name;
+  RETURN d
 END Build;
 
 (* Parses text (up to its first 0X) as one YAML document. Anchors,
@@ -470,6 +482,434 @@ BEGIN
   RETURN s
 END Path;
 
+(* ---- Typed scalars ----
+
+   libfyaml's core API gives scalars as text; these resolve it the way
+   YAML 1.2's core schema does (null, bool, int, float), as alibfyaml
+   does. The text is first trimmed of blanks. Accepted:
+
+   - integers: [+-] then decimal digits, or 0x/0o/0b and hex, octal
+     or binary digits. 0b, and "_" between two digits in any base
+     ("1_000_000", "0xFF_FF"), are extensions beyond the core schema,
+     as in alibfyaml; a leading, trailing or doubled "_" is rejected.
+   - floats: [+-] then digits, ".digits", "digits." or
+     "digits.digits", then an optional exponent; any integer written
+     in decimal is also a float. "_" as for integers. .inf and .nan
+     are not accepted (deferred, as in alibfyaml).
+   - booleans: true/True/TRUE and false/False/FALSE only.
+   - null: see IsNullValue.
+
+   Each typed accessor returns FALSE and sets err (a DataError) when the
+   text doesn't fit the type, including a number out of range; v is
+   then unchanged. On success err is NIL. The error carries the node's
+   path and, where the node has one, its line and column. *)
+
+(* Where a DataError points: a scalar's 1-based location, or FALSE.
+   A scalar made by CreateScalar reports 0:0, which can't be told from
+   a parsed one at the very start of the input (confirmed live), so in
+   a document that has had scalars created 0:0 counts as no location. *)
+PROCEDURE ScalarLocation(d: Document; h: FyThin.Node; VAR line, column: INTEGER): BOOLEAN;
+  VAR l, c: SYSTEM.INT32;
+BEGIN
+  IF (h = 0) OR ~FyThin.NodeScalarMark(h, l, c) OR (d.created & (l = 0) & (c = 0)) THEN
+    RETURN FALSE
+  END;
+  line := l + 1; column := c + 1;
+  RETURN TRUE
+END ScalarLocation;
+
+(* An Error of kind about node n, located at the scalar at (n itself,
+   or a key; 0 for none). Message: "file:line:column: error: path:
+   text"; without a location "file: error: path: text"; and for a
+   built document, which has no file, "path: error: text". *)
+PROCEDURE NodeError(kind: INTEGER; n: Node; at: FyThin.Node; text: ARRAY OF CHAR): Error;
+  VAR err: Error; len: LONGINT; d: Document;
+BEGIN
+  d := n.doc;
+  NEW(err); err.kind := kind; err.path := n.Path(); err.line := 0; err.column := 0;
+  IF ~ScalarLocation(d, at, err.line, err.column) THEN err.line := 0; err.column := 0 END;
+  IF d.name # NIL THEN err.file := d.name ELSE err.file := err.path END;
+  len := 0; Append(err.msg, len, err.file^);
+  IF err.line > 0 THEN
+    Append(err.msg, len, ":"); AppendInt(err.msg, len, err.line);
+    Append(err.msg, len, ":"); AppendInt(err.msg, len, err.column)
+  END;
+  Append(err.msg, len, ": error: ");
+  IF d.name # NIL THEN Append(err.msg, len, err.path^); Append(err.msg, len, ": ") END;
+  Append(err.msg, len, text); Append(err.msg, len, 0AX);
+  RETURN err
+END NodeError;
+
+(* A DataError about scalar n: 'what: "text"'. *)
+PROCEDURE ValueError(n: Node; what: ARRAY OF CHAR; s: String): Error;
+  VAR t: String; len: LONGINT;
+BEGIN
+  t := NIL; len := 0;
+  Append(t, len, what); Append(t, len, ': "'); Append(t, len, s^); Append(t, len, '"');
+  RETURN NodeError(DataError, n, n.handle, t^)
+END ValueError;
+
+(* The scalar's text without leading or trailing blanks. *)
+PROCEDURE Trimmed(n: Node): String;
+  VAR p, len, a, b: SYSTEM.ADDRESS; c: CHAR;
+BEGIN
+  p := ScalarBytes(n, len);
+  a := 0; b := len;
+  LOOP IF a = b THEN EXIT END; SYSTEM.GET(p + a, c); IF c # " " THEN EXIT END; INC(a) END;
+  LOOP IF b = a THEN EXIT END; SYSTEM.GET(p + b - 1, c); IF c # " " THEN EXIT END; DEC(b) END;
+  RETURN FromBytes(p + a, b - a)
+END Trimmed;
+
+(* s up to its terminating 0X equals lit. s may hold an embedded 0X,
+   which then makes it differ. *)
+PROCEDURE Is(s: String; lit: ARRAY OF CHAR): BOOLEAN;
+  VAR i: LONGINT;
+BEGIN
+  IF LEN(s^) - 1 # Length(lit) THEN RETURN FALSE END;
+  FOR i := 0 TO LEN(s^) - 2 DO IF s[i] # lit[i] THEN RETURN FALSE END END;
+  RETURN TRUE
+END Is;
+
+(* A digit's value, or 99 for anything else. *)
+PROCEDURE DigitVal(c: CHAR): INTEGER;
+BEGIN
+  IF (c >= "0") & (c <= "9") THEN RETURN ORD(c) - ORD("0")
+  ELSIF (c >= "a") & (c <= "f") THEN RETURN ORD(c) - ORD("a") + 10
+  ELSIF (c >= "A") & (c <= "F") THEN RETURN ORD(c) - ORD("A") + 10
+  ELSE RETURN 99
+  END
+END DigitVal;
+
+(* The length of the run digit {["_"] digit} of base-digits at s[i],
+   or 0 if s[i] isn't one. *)
+PROCEDURE DigitRun(s: String; i: LONGINT; base: INTEGER): LONGINT;
+  VAR j, n: LONGINT;
+BEGIN
+  n := LEN(s^) - 1; j := i;
+  IF (j >= n) OR (DigitVal(s[j]) >= base) THEN RETURN 0 END;
+  INC(j);
+  LOOP
+    IF j >= n THEN EXIT
+    ELSIF DigitVal(s[j]) < base THEN INC(j)
+    ELSIF (s[j] = "_") & (j + 1 < n) & (DigitVal(s[j + 1]) < base) THEN INC(j, 2)
+    ELSE EXIT
+    END
+  END;
+  RETURN j - i
+END DigitRun;
+
+(* Parses s as an integer. FALSE if it doesn't match the grammar;
+   otherwise TRUE, with overflow set if it is outside LONGINT.
+
+   The value is built negatively, Java's Long.parseLong way, so that
+   MIN(LONGINT) parses. voc's DIV of a negative number near
+   MIN(LONGINT) overflows ((MIN(LONGINT) + 9) DIV 10 came out
+   positive, confirmed live), so every DIV here is of MAX(LONGINT). *)
+PROCEDURE ParseInt(s: String; VAR v: LONGINT; VAR overflow: BOOLEAN): BOOLEAN;
+  VAR i, n, r, limit, multmin: LONGINT; neg: BOOLEAN; base, d: INTEGER;
+BEGIN
+  n := LEN(s^) - 1; i := 0; neg := FALSE; overflow := FALSE;
+  IF (n > 0) & ((s[0] = "+") OR (s[0] = "-")) THEN neg := s[0] = "-"; i := 1 END;
+  base := 10;
+  IF (n - i >= 2) & (s[i] = "0") THEN
+    IF s[i + 1] = "x" THEN base := 16; INC(i, 2)
+    ELSIF s[i + 1] = "o" THEN base := 8; INC(i, 2)
+    ELSIF s[i + 1] = "b" THEN base := 2; INC(i, 2)
+    END
+  END;
+  IF (i = n) OR (DigitRun(s, i, base) # n - i) THEN RETURN FALSE END;
+  IF neg THEN   (* limit = MIN(LONGINT); multmin = limit / base, truncated *)
+    limit := MIN(LONGINT);
+    multmin := -(MAX(LONGINT) DIV base + (MAX(LONGINT) MOD base + 1) DIV base)
+  ELSE
+    limit := -MAX(LONGINT); multmin := -(MAX(LONGINT) DIV base)
+  END;
+  r := 0;
+  WHILE i < n DO
+    IF s[i] # "_" THEN
+      d := DigitVal(s[i]);
+      IF r < multmin THEN overflow := TRUE; RETURN TRUE END;
+      r := r * base;
+      IF r < limit + d THEN overflow := TRUE; RETURN TRUE END;
+      r := r - d
+    END;
+    INC(i)
+  END;
+  IF neg THEN v := r ELSE v := -r END;
+  RETURN TRUE
+END ParseInt;
+
+(* Checks s against the float grammar; if it matches, buf is s without
+   its "_"s, ready for strtod. *)
+PROCEDURE FloatText(s: String; VAR buf: String): BOOLEAN;
+  VAR i, n, k, intLen, fracLen: LONGINT;
+BEGIN
+  n := LEN(s^) - 1; i := 0;
+  IF (n > 0) & ((s[0] = "+") OR (s[0] = "-")) THEN i := 1 END;
+  intLen := DigitRun(s, i, 10); INC(i, intLen);
+  fracLen := 0;
+  IF (i < n) & (s[i] = ".") THEN INC(i); fracLen := DigitRun(s, i, 10); INC(i, fracLen) END;
+  IF intLen + fracLen = 0 THEN RETURN FALSE END;
+  IF (i < n) & ((s[i] = "e") OR (s[i] = "E")) THEN
+    INC(i);
+    IF (i < n) & ((s[i] = "+") OR (s[i] = "-")) THEN INC(i) END;
+    k := DigitRun(s, i, 10);
+    IF k = 0 THEN RETURN FALSE END;
+    INC(i, k)
+  END;
+  IF i # n THEN RETURN FALSE END;
+  NEW(buf, n + 1); k := 0;
+  FOR i := 0 TO n - 1 DO IF s[i] # "_" THEN buf[k] := s[i]; INC(k) END END;
+  buf[k] := 0X;
+  RETURN TRUE
+END FloatText;
+
+PROCEDURE IsNullText(s: String): BOOLEAN;
+BEGIN RETURN Is(s, "~") OR Is(s, "null") OR Is(s, "Null") OR Is(s, "NULL")
+END IsNullText;
+
+PROCEDURE IsTrueText(s: String): BOOLEAN;
+BEGIN RETURN Is(s, "true") OR Is(s, "True") OR Is(s, "TRUE")
+END IsTrueText;
+
+PROCEDURE IsFalseText(s: String): BOOLEAN;
+BEGIN RETURN Is(s, "false") OR Is(s, "False") OR Is(s, "FALSE")
+END IsFalseText;
+
+(* TRUE if n is null: an empty plain scalar ("key:" with nothing
+   after), or a plain scalar whose text is ~, null, Null or NULL. A
+   quoted scalar is a string, never null, as in YAML's core schema
+   (alibfyaml counts a quoted "null" as null). Any kind of node may be
+   asked;
+   an alias is never null (its text is the anchor's name, and asking
+   libfyaml reads uninitialised memory -- slibfyaml, under valgrind). *)
+PROCEDURE (n: Node) IsNullValue*(): BOOLEAN;
+BEGIN
+  Live(n);
+  IF FyThin.NodeIsAlias(n.handle) THEN RETURN FALSE END;
+  RETURN FyThin.NodeIsNull(n.handle)
+    OR (n.IsScalar() & FyThin.NodeIsPlain(n.handle) & IsNullText(Trimmed(n)))
+END IsNullValue;
+
+(* Whether the text fits each grammar (without checking the range).
+   FALSE for a sequence or mapping. *)
+PROCEDURE (n: Node) IsInteger*(): BOOLEAN;
+  VAR v: LONGINT; overflow: BOOLEAN;
+BEGIN RETURN n.IsScalar() & ParseInt(Trimmed(n), v, overflow)
+END IsInteger;
+
+PROCEDURE (n: Node) IsReal*(): BOOLEAN;
+  VAR buf: String;
+BEGIN RETURN n.IsScalar() & FloatText(Trimmed(n), buf)
+END IsReal;
+
+PROCEDURE (n: Node) IsBoolean*(): BOOLEAN;
+  VAR s: String;
+BEGIN
+  IF ~n.IsScalar() THEN RETURN FALSE END;
+  s := Trimmed(n);
+  RETURN IsTrueText(s) OR IsFalseText(s)
+END IsBoolean;
+
+(* The typed value of scalar n (halts with AssertKind for a sequence
+   or mapping). FALSE and a DataError if the text doesn't fit. *)
+PROCEDURE (n: Node) LongIntValue*(VAR v: LONGINT; VAR err: Error): BOOLEAN;
+  VAR s: String; x: LONGINT; overflow: BOOLEAN;
+BEGIN
+  err := NIL; s := Trimmed(n);
+  IF ~ParseInt(s, x, overflow) THEN err := ValueError(n, "not a valid integer", s); RETURN FALSE END;
+  IF overflow THEN err := ValueError(n, "integer out of range", s); RETURN FALSE END;
+  v := x;
+  RETURN TRUE
+END LongIntValue;
+
+PROCEDURE (n: Node) IntegerValue*(VAR v: INTEGER; VAR err: Error): BOOLEAN;
+  VAR x: LONGINT;
+BEGIN
+  IF ~n.LongIntValue(x, err) THEN RETURN FALSE END;
+  IF (x < MIN(INTEGER)) OR (x > MAX(INTEGER)) THEN
+    err := ValueError(n, "integer out of range", Trimmed(n)); RETURN FALSE
+  END;
+  v := SHORT(x);
+  RETURN TRUE
+END IntegerValue;
+
+PROCEDURE (n: Node) LongRealValue*(VAR v: LONGREAL; VAR err: Error): BOOLEAN;
+  VAR s, buf: String; x: LONGREAL;
+BEGIN
+  err := NIL; s := Trimmed(n);
+  IF ~FloatText(s, buf) THEN err := ValueError(n, "not a valid float", s); RETURN FALSE END;
+  x := FyThin.Strtod(SYSTEM.ADR(buf[0]));
+  IF ABS(x) > MAX(LONGREAL) THEN err := ValueError(n, "float out of range", s); RETURN FALSE END;
+  v := x;
+  RETURN TRUE
+END LongRealValue;
+
+(* A value beyond MAX(REAL) is out of range even if it would round
+   down to MAX(REAL). *)
+PROCEDURE (n: Node) RealValue*(VAR v: REAL; VAR err: Error): BOOLEAN;
+  VAR x: LONGREAL;
+BEGIN
+  IF ~n.LongRealValue(x, err) THEN RETURN FALSE END;
+  IF ABS(x) > MAX(REAL) THEN err := ValueError(n, "float out of range", Trimmed(n)); RETURN FALSE END;
+  v := SHORT(x);
+  RETURN TRUE
+END RealValue;
+
+PROCEDURE (n: Node) BooleanValue*(VAR v: BOOLEAN; VAR err: Error): BOOLEAN;
+  VAR s: String;
+BEGIN
+  err := NIL; s := Trimmed(n);
+  IF IsTrueText(s) THEN v := TRUE
+  ELSIF IsFalseText(s) THEN v := FALSE
+  ELSE err := ValueError(n, "not a valid boolean", s); RETURN FALSE
+  END;
+  RETURN TRUE
+END BooleanValue;
+
+(* ---- Mapping fields ----
+
+   Value(key) plus a typed accessor, split into a required form
+   (...Field: a missing key is a MissingKey error) and an optional one
+   (...FieldOr: a missing key gives default). A default stands in only
+   for a missing key: a key that is present but whose value isn't a
+   scalar, or doesn't fit the type, is a DataError in both forms. The
+   receiver must be a mapping (else AssertKind). *)
+
+PROCEDURE Missing(m: Node; VAR key: ARRAY OF CHAR): Error;
+  VAR t: String; len: LONGINT;
+BEGIN
+  t := NIL; len := 0;
+  Append(t, len, 'missing required key "'); Append(t, len, key); Append(t, len, '"');
+  RETURN NodeError(MissingKey, m, 0, t^)
+END Missing;
+
+(* The scalar value for key. NIL if there is none, with err: a
+   MissingKey if required, else NIL. NIL and a DataError if the value
+   isn't a scalar, located at its key. *)
+PROCEDURE FieldValue(m: Node; VAR key: ARRAY OF CHAR; required: BOOLEAN; VAR err: Error): Node;
+  VAR v: Node;
+BEGIN
+  err := NIL;
+  v := m.Value(key);
+  IF v = NIL THEN
+    IF required THEN err := Missing(m, key) END;
+    RETURN NIL
+  END;
+  IF ~v.IsScalar() THEN
+    err := NodeError(DataError, v,
+      FyThin.NodeMappingLookupKeyByString(m.handle, SYSTEM.ADR(key[0]), Length(key)),
+      "not a scalar value");
+    RETURN NIL
+  END;
+  RETURN v
+END FieldValue;
+
+(* The value for key, of any kind; NIL and a MissingKey error if there
+   is none. *)
+PROCEDURE (m: Node) Required*(key: ARRAY OF CHAR; VAR err: Error): Node;
+  VAR v: Node;
+BEGIN
+  err := NIL; v := m.Value(key);
+  IF v = NIL THEN err := Missing(m, key) END;
+  RETURN v
+END Required;
+
+PROCEDURE (m: Node) LongIntField*(key: ARRAY OF CHAR; VAR v: LONGINT; VAR err: Error): BOOLEAN;
+  VAR n: Node;
+BEGIN n := FieldValue(m, key, TRUE, err); RETURN (n # NIL) & n.LongIntValue(v, err)
+END LongIntField;
+
+PROCEDURE (m: Node) LongIntFieldOr*(key: ARRAY OF CHAR; default: LONGINT; VAR v: LONGINT;
+                                     VAR err: Error): BOOLEAN;
+  VAR n: Node;
+BEGIN
+  n := FieldValue(m, key, FALSE, err);
+  IF n # NIL THEN RETURN n.LongIntValue(v, err) END;
+  IF err = NIL THEN v := default END;
+  RETURN err = NIL
+END LongIntFieldOr;
+
+PROCEDURE (m: Node) IntegerField*(key: ARRAY OF CHAR; VAR v: INTEGER; VAR err: Error): BOOLEAN;
+  VAR n: Node;
+BEGIN n := FieldValue(m, key, TRUE, err); RETURN (n # NIL) & n.IntegerValue(v, err)
+END IntegerField;
+
+PROCEDURE (m: Node) IntegerFieldOr*(key: ARRAY OF CHAR; default: INTEGER; VAR v: INTEGER;
+                                     VAR err: Error): BOOLEAN;
+  VAR n: Node;
+BEGIN
+  n := FieldValue(m, key, FALSE, err);
+  IF n # NIL THEN RETURN n.IntegerValue(v, err) END;
+  IF err = NIL THEN v := default END;
+  RETURN err = NIL
+END IntegerFieldOr;
+
+PROCEDURE (m: Node) LongRealField*(key: ARRAY OF CHAR; VAR v: LONGREAL; VAR err: Error): BOOLEAN;
+  VAR n: Node;
+BEGIN n := FieldValue(m, key, TRUE, err); RETURN (n # NIL) & n.LongRealValue(v, err)
+END LongRealField;
+
+PROCEDURE (m: Node) LongRealFieldOr*(key: ARRAY OF CHAR; default: LONGREAL; VAR v: LONGREAL;
+                                      VAR err: Error): BOOLEAN;
+  VAR n: Node;
+BEGIN
+  n := FieldValue(m, key, FALSE, err);
+  IF n # NIL THEN RETURN n.LongRealValue(v, err) END;
+  IF err = NIL THEN v := default END;
+  RETURN err = NIL
+END LongRealFieldOr;
+
+PROCEDURE (m: Node) RealField*(key: ARRAY OF CHAR; VAR v: REAL; VAR err: Error): BOOLEAN;
+  VAR n: Node;
+BEGIN n := FieldValue(m, key, TRUE, err); RETURN (n # NIL) & n.RealValue(v, err)
+END RealField;
+
+PROCEDURE (m: Node) RealFieldOr*(key: ARRAY OF CHAR; default: REAL; VAR v: REAL;
+                                  VAR err: Error): BOOLEAN;
+  VAR n: Node;
+BEGIN
+  n := FieldValue(m, key, FALSE, err);
+  IF n # NIL THEN RETURN n.RealValue(v, err) END;
+  IF err = NIL THEN v := default END;
+  RETURN err = NIL
+END RealFieldOr;
+
+PROCEDURE (m: Node) BooleanField*(key: ARRAY OF CHAR; VAR v: BOOLEAN; VAR err: Error): BOOLEAN;
+  VAR n: Node;
+BEGIN n := FieldValue(m, key, TRUE, err); RETURN (n # NIL) & n.BooleanValue(v, err)
+END BooleanField;
+
+PROCEDURE (m: Node) BooleanFieldOr*(key: ARRAY OF CHAR; default: BOOLEAN; VAR v: BOOLEAN;
+                                     VAR err: Error): BOOLEAN;
+  VAR n: Node;
+BEGIN
+  n := FieldValue(m, key, FALSE, err);
+  IF n # NIL THEN RETURN n.BooleanValue(v, err) END;
+  IF err = NIL THEN v := default END;
+  RETURN err = NIL
+END BooleanFieldOr;
+
+(* The scalar's text as Scalar gives it (not trimmed). *)
+PROCEDURE (m: Node) StringField*(key: ARRAY OF CHAR; VAR s: String; VAR err: Error): BOOLEAN;
+  VAR n: Node;
+BEGIN
+  n := FieldValue(m, key, TRUE, err);
+  IF n = NIL THEN RETURN FALSE END;
+  s := n.Scalar();
+  RETURN TRUE
+END StringField;
+
+PROCEDURE (m: Node) StringFieldOr*(key: ARRAY OF CHAR; default: ARRAY OF CHAR; VAR s: String;
+                                    VAR err: Error): BOOLEAN;
+  VAR n: Node;
+BEGIN
+  n := FieldValue(m, key, FALSE, err);
+  IF n # NIL THEN s := n.Scalar(); RETURN TRUE END;
+  IF err = NIL THEN s := FromChars(default) END;
+  RETURN err = NIL
+END StringFieldOr;
+
 (* ---- Iteration ---- *)
 
 (* Starts iterating a sequence's items:
@@ -529,6 +969,7 @@ BEGIN
   ASSERT(d.handle # 0, AssertInvalid);
   h := FyThin.NodeCreateScalarCopy(d.handle, SYSTEM.ADR(text[0]), Length(text));
   ASSERT(h # 0); AddOrphan(d, h);
+  d.created := TRUE;
   RETURN NewNode(d, h)
 END CreateScalar;
 
@@ -596,7 +1037,8 @@ BEGIN
     file := FromChars(path);
     IF target = 0 THEN err := NewError(PathError, file, "no node at this path")
     ELSE err := NewError(PathError, file, "cannot insert here")
-    END
+    END;
+    err.path := file
   END;
   RETURN rc = 0
 END InsertAt;
@@ -626,7 +1068,7 @@ BEGIN
   END;
   (* The only failure left after the checks above is a duplicate key. *)
   path := n.Path();
-  NEW(err); err.kind := DuplicateKey; err.file := path; err.line := 0; err.column := 0;
+  NEW(err); err.kind := DuplicateKey; err.file := path; err.line := 0; err.column := 0; err.path := path;
   len := 0;
   Append(err.msg, len, path^); Append(err.msg, len, ": error: duplicate key");
   IF key.IsScalar() THEN

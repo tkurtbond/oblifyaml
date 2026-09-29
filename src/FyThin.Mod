@@ -157,6 +157,43 @@ PROCEDURE NodeIsMapping*(fyn: Node): BOOLEAN;
 BEGIN RETURN nodeIsMapping(fyn)
 END NodeIsMapping;
 
+(* fy_node_is_alias is a static inline too; fy_node_is_null is
+   exported. fy_node_is_null is TRUE for an empty plain scalar
+   ("key:" with nothing after) but not for a quoted "" nor for the
+   text "~"/"null" (confirmed live), and it reads an uninitialised
+   field on an unresolved alias (slibfyaml, under valgrind), so ask
+   NodeIsAlias first. *)
+PROCEDURE -nodeIsAlias(fyn: Node): BOOLEAN "(BOOLEAN)fy_node_is_alias((struct fy_node*)fyn)";
+PROCEDURE -nodeIsNull(fyn: Node): BOOLEAN "(BOOLEAN)(fy_node_is_null((struct fy_node*)fyn) != 0)";
+
+PROCEDURE -nodeIsPlain(fyn: Node): BOOLEAN "(BOOLEAN)(fy_node_get_style((struct fy_node*)fyn) == FYNS_PLAIN)";
+
+(* TRUE for a plain (unquoted, non-block) scalar. *)
+PROCEDURE NodeIsPlain*(fyn: Node): BOOLEAN;
+BEGIN RETURN nodeIsPlain(fyn)
+END NodeIsPlain;
+
+PROCEDURE NodeIsAlias*(fyn: Node): BOOLEAN;
+BEGIN RETURN nodeIsAlias(fyn)
+END NodeIsAlias;
+
+PROCEDURE NodeIsNull*(fyn: Node): BOOLEAN;
+BEGIN RETURN nodeIsNull(fyn)
+END NodeIsNull;
+
+(* The start of a scalar's token, 0-based (fy_mark's convention; the
+   diag's are 1-based). Only scalars have one: a mapping or sequence
+   has no scalar token. A scalar made by fy_node_create_scalar_copy
+   reports 0, 0 (confirmed live), which can't be told from a parsed
+   scalar at the start of the input. *)
+PROCEDURE -nodeScalarMark(fyn: Node; linep, colp: SYSTEM.ADDRESS): BOOLEAN
+  "({ struct fy_token *t_ = fy_node_get_scalar_token((struct fy_node*)fyn); const struct fy_mark *m_ = t_ ? fy_token_start_mark(t_) : NULL; if (m_) { *(INT32*)linep = m_->line; *(INT32*)colp = m_->column; } (BOOLEAN)(m_ != NULL); })";
+
+(* FALSE if fyn has no location (not a scalar, or no start mark). *)
+PROCEDURE NodeScalarMark*(fyn: Node; VAR line, column: SYSTEM.INT32): BOOLEAN;
+BEGIN RETURN nodeScalarMark(fyn, SYSTEM.ADR(line), SYSTEM.ADR(column))
+END NodeScalarMark;
+
 (* ---- Scalars ---- *)
 
 PROCEDURE -nodeGetScalar(fyn: Node; lenp: SYSTEM.ADDRESS): SYSTEM.ADDRESS
@@ -198,6 +235,8 @@ PROCEDURE -nodeMappingItemCount(fyn: Node): SYSTEM.INT32
   "(INT32)fy_node_mapping_item_count((struct fy_node*)fyn)";
 PROCEDURE -nodeMappingLookupValueByString(fyn: Node; key, len: SYSTEM.ADDRESS): Node
   "(ADDRESS)fy_node_mapping_lookup_value_by_string((struct fy_node*)fyn, (const char*)key, (size_t)len)";
+PROCEDURE -nodeMappingLookupKeyByString(fyn: Node; key, len: SYSTEM.ADDRESS): Node
+  "(ADDRESS)fy_node_mapping_lookup_key_by_string((struct fy_node*)fyn, (const char*)key, (size_t)len)";
 PROCEDURE -nodeMappingIterate(fyn: Node; prevp: SYSTEM.ADDRESS): NodePair
   "(ADDRESS)fy_node_mapping_iterate((struct fy_node*)fyn, (void**)prevp)";
 PROCEDURE -nodePairKey(p: NodePair): Node "(ADDRESS)fy_node_pair_key((struct fy_node_pair*)p)";
@@ -212,6 +251,11 @@ END NodeMappingItemCount;
 PROCEDURE NodeMappingLookupValueByString*(fyn: Node; key, len: SYSTEM.ADDRESS): Node;
 BEGIN RETURN nodeMappingLookupValueByString(fyn, key, len)
 END NodeMappingLookupValueByString;
+
+(* Like NodeMappingLookupValueByString, but returns the key node. *)
+PROCEDURE NodeMappingLookupKeyByString*(fyn: Node; key, len: SYSTEM.ADDRESS): Node;
+BEGIN RETURN nodeMappingLookupKeyByString(fyn, key, len)
+END NodeMappingLookupKeyByString;
 
 (* Start with prev = 0; returns 0 when done. *)
 PROCEDURE NodeMappingIterate*(fyn: Node; VAR prev: SYSTEM.ADDRESS): NodePair;
@@ -378,6 +422,7 @@ PROCEDURE -strlen(p: SYSTEM.ADDRESS): SYSTEM.ADDRESS "(ADDRESS)strlen((const cha
 PROCEDURE -openErrno(path: SYSTEM.ADDRESS): SYSTEM.INT32
   '({ FILE *f_ = fopen((const char*)path, "r"); int e_ = f_ ? 0 : errno; if (f_) fclose(f_); (INT32)e_; })';
 PROCEDURE -strerror(e: SYSTEM.INT32): SYSTEM.ADDRESS "(ADDRESS)strerror((int)e)";
+PROCEDURE -strtod(p: SYSTEM.ADDRESS): LONGREAL "(LONGREAL)strtod((const char*)p, NULL)";
 
 (* 0 if the file at path (0X-terminated) opens for reading, else the
    errno from fopen. libfyaml reports an unopenable file only on
@@ -391,6 +436,13 @@ END OpenErrno;
 PROCEDURE Strerror*(e: SYSTEM.INT32): SYSTEM.ADDRESS;
 BEGIN RETURN strerror(e)
 END Strerror;
+
+(* p: a 0X-terminated C string already checked against the float
+   grammar. Correctly rounded (glibc); an overflow gives +-infinity.
+   voc programs never call setlocale, so "." is the decimal point. *)
+PROCEDURE Strtod*(p: SYSTEM.ADDRESS): LONGREAL;
+BEGIN RETURN strtod(p)
+END Strtod;
 
 PROCEDURE Free*(p: SYSTEM.ADDRESS);
 BEGIN free(p)

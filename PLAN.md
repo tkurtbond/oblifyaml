@@ -275,17 +275,18 @@ There are two classes of error, handled differently:
 TYPE
   Error* = POINTER TO ErrorDesc;
   ErrorDesc* = RECORD
-    kind-: INTEGER;          (* parseError, missingKey, dataError, resolveError, emitError, ioError *)
-    file-: String;           (* may be NIL *)
+    kind-: INTEGER;          (* ParseError, FileError, EmitError, PathError, DuplicateKey, MissingKey, DataError *)
+    file-: String;           (* never NIL *)
     line-, column-: INTEGER; (* C int; 1-based, 0 = unknown *)
+    path-: String;           (* the node concerned, or NIL *)
     msg-: String             (* full "file:line:col: error: text" diagnostic *)
   END;
 
 PROCEDURE ParseString*(text: ARRAY OF CHAR; VAR err: Error): Document;  (* NIL + err on failure *)
 PROCEDURE ParseFile*(path: ARRAY OF CHAR; VAR err: Error): Document;
-PROCEDURE (n: Node) IntValue*(VAR v: LONGINT): BOOLEAN;                   (* FALSE: not an int *)
-PROCEDURE (m: Node) IntField*(key: ARRAY OF CHAR; VAR v: LONGINT; VAR err: Error): BOOLEAN;
-PROCEDURE (m: Node) IntFieldOr*(key: ARRAY OF CHAR; default: LONGINT; VAR v: LONGINT; VAR err: Error): BOOLEAN;
+PROCEDURE (n: Node) LongIntValue*(VAR v: LONGINT; VAR err: Error): BOOLEAN;
+PROCEDURE (m: Node) LongIntField*(key: ARRAY OF CHAR; VAR v: LONGINT; VAR err: Error): BOOLEAN;
+PROCEDURE (m: Node) LongIntFieldOr*(key: ARRAY OF CHAR; default: LONGINT; VAR v: LONGINT; VAR err: Error): BOOLEAN;
 ```
 
 - `err` is NIL on success. Error messages use the gcc diagnostic
@@ -340,25 +341,53 @@ The semantics port directly from alibfyaml's PLAN.md and README:
 YAML 1.2 core schema, plus the two documented extensions (`0b`
 binary, and `_` between digits).
 
-- **Nulls:** `IsNullValue` accepts `""`, `~`, `null`, `Null`, and
-  `NULL`. It **returns FALSE for an alias node without calling
-  `fy_node_is_null`**. That port of the alibfyaml/slibfyaml fix avoids
-  an uninitialised read inside libfyaml on unresolved aliases from
-  streams.
+- **Nulls:** `IsNullValue` accepts an empty plain scalar (`key:` with
+  nothing after, via `fy_node_is_null`) and the plain texts `~`,
+  `null`, `Null`, `NULL`. A quoted scalar, `''` or `'null'`, is a
+  string, as in the core schema. (This departs from alibfyaml, which
+  counts a quoted `"null"` as null; `fy_node_is_null` itself is FALSE
+  for both quoted forms, confirmed live.) It **returns FALSE for an
+  alias node without calling `fy_node_is_null`**. That port of the
+  alibfyaml/slibfyaml fix avoids an uninitialised read inside libfyaml
+  on unresolved aliases from streams.
 - **Booleans:** `true`/`True`/`TRUE` and `false`/`False`/`FALSE` only.
 - **Integers:** decimal, `0x`, and `0o` (plus the `0b` and `_`
-  extensions). Parse them in Oberon, with overflow checking, into
-  64-bit `LONGINT` (`IntValue`) and 32-bit `INTEGER` (`IntegerValue`,
+  extensions), with a sign allowed before a prefix (`-0x1A`). Parsed
+  in Oberon, with overflow checking, into 64-bit `LONGINT`
+  (`LongIntValue`) and 32-bit `INTEGER` (`IntegerValue`,
   range-checked). Under `-OC`, those are the Oberon equivalents of C's
-  `long` and `int`.
+  `long` and `int`. The names follow the Oberon type names
+  (`LongInt`, `Integer`, `Real`, `LongReal`, `Boolean`, `String`)
+  rather than the `IntValue` sketched earlier, so the type each
+  returns is never in doubt.
 - **Floats:** validate the core-schema grammar in Oberon, strip `_`,
   then convert with C `strtod` in a code procedure, for correct
   rounding without depending on how well voc's `Reals`/`Strings`
-  convert. Return `LONGREAL` (and `REAL`). `.inf` and `.nan` are
-  deferred, as in Ada.
-- **Mapping-key forms:** `Required(key): Node`, plus the
-  `…Field`/`…FieldOr` pairs shown above. A missing key and a
-  malformed value give different `Error.kind` values.
+  convert. Return `LONGREAL` (`LongRealValue`) and `REAL`
+  (`RealValue`, out of range beyond `MAX(REAL)`). Unlike alibfyaml,
+  `.5` and `5.` are accepted: the core schema allows them, and Ada
+  excluded them only because `Float'Value` doesn't. `.inf` and `.nan`
+  are deferred, as in Ada.
+- **Quoted text is resolved too** (`port: '8080'` reads as 8080),
+  as in alibfyaml: a caller who asks for an integer has said what
+  they want. Only `IsNullValue` looks at the style.
+- **Predicates** `IsInteger`/`IsReal`/`IsBoolean` check the grammar
+  only (not the range), and return FALSE for a sequence or mapping.
+  The per-node value accessors halt with `AssertKind` on one
+  (alibfyaml's precondition); the field forms report it as a
+  `DataError`.
+- **Mapping-key forms:** `Required(key; VAR err): Node`, plus a
+  `…Field`/`…FieldOr` pair per type. A missing key is `MissingKey`; a
+  malformed value, a number out of range, or a value that isn't a
+  scalar is `DataError`, in both forms: a default stands in only for
+  a missing key. On failure the `VAR` result is unchanged.
+- **Errors carry `path` and a location.** The message is
+  `file:line:column: error: path: text`, located at the offending
+  scalar, or at its key when the value isn't a scalar (only scalars
+  have a location in libfyaml: `fy_node_get_scalar_token`). A
+  `MissingKey` has no location. A document from `NewDocument` has no
+  file, so its messages read `path: error: text`, the same as
+  `DuplicateKey`'s.
 
 ## Test strategy
 
@@ -502,9 +531,35 @@ valgrind, with findings written into this file.
      unless each test's still-reachable is exactly
      `256,024 bytes in 1 blocks`; with the orphan free disabled it
      fails on `TestBuild` (14 blocks), and it passes with it enabled.
-3. **Typed scalars.** Everything under "Typed scalars", with `Path`
-   and `Location` in errors. Port `TestScalars` using
-   alibfyaml's `scalars.yaml`.
+3. **`[done]` Typed scalars.** Everything under "Typed scalars", with
+   the path and location in errors (`Error.path`, new kinds
+   `MissingKey` and `DataError`). `FyThin` gained `fy_node_is_null`,
+   `fy_node_is_alias`, the plain-style check, the scalar token's start
+   mark, `fy_node_mapping_lookup_key_by_string`, and `strtod`. Tests:
+   `TestScalars` (107 checks), all of alibfyaml's `test_scalars` on
+   its `scalars.yaml` plus exact messages and locations, the
+   `LONGINT`/`INTEGER` limits in decimal and hex, the float forms,
+   `IsNullValue`, and a built document's errors; halt test
+   `HaltTyped` (62). All pass, and all are clean under valgrind.
+   Sabotaging the `MIN(LONGINT)` limit and the boolean result made 7
+   checks fail, so the test notices.
+
+   Found while doing it, confirmed live:
+   - **voc's `DIV` overflows near `MIN(LONGINT)`**:
+     `(MIN(LONGINT) + 9) DIV 10` came out positive. `ParseInt` builds
+     the value negatively (so `MIN(LONGINT)` parses) and divides only
+     `MAX(LONGINT)`.
+   - **An unsuffixed real literal is a `REAL`**, so
+     `x = 1234.56` compares a `LONGREAL` with a widened 32-bit value
+     and fails. With the `D` suffix (`1234.56D0`) voc's literals match
+     glibc's `strtod` bit for bit, so tests compare exactly.
+   - **A created scalar's location is line 0, column 0**, the same as
+     a parsed scalar at the very first byte, and no public libfyaml
+     call tells them apart. A document that has had `CreateScalar`
+     called on it reports no location for 0:0.
+   - `fy_node_is_null` is TRUE for an empty plain scalar, FALSE for
+     `''`, `~` and `'null'`; a mapping or sequence has no scalar token
+     (so no location); `fy_token_start_mark` is 0-based.
 4. **Anchors, tags, location.** A `resolve` parse option (default
    TRUE, as alibfyaml decided), `Resolve(doc, VAR err)`, `IsAlias`,
    `Tag`, `Style`, `HasLocation`/`Location`, and the alias-safe
