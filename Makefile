@@ -28,18 +28,33 @@ TESTS := TestThin TestParseErrors TestQuickstart TestNavigate TestPath TestLiven
 # the status is one of Fyaml's Assert* codes.
 HALTTESTS := HaltClosed:61 HaltKind:62 HaltIndex:63 HaltStale:61 HaltAttach:64 HaltAttached:64 HaltTyped:62 HaltResolved:61 HaltStream:61
 
+# Example programs (examples/<name>.Mod), as name:required-exit-status.
+# `make test` runs each from examples/ and requires that status and
+# stdout identical to examples/<name>.expected. The Example*Error ones
+# report a deliberate error in their fixture, so exit 1.
+EXAMPLES := ExampleConfig:0 ExampleSyntaxError:1 ExampleValueError:1 ExampleMissingField:1
+
 LIBOBJS  := $(LIBMODS:%=$(BUILD)/%.o)
 SUPPOBJS := $(TESTSUPPORT:%=$(BUILD)/%.o)
 TESTBINS := $(TESTS:%=$(BUILD)/%)
 HALTBINS := $(foreach h,$(HALTTESTS),$(BUILD)/$(firstword $(subst :, ,$(h))))
+EXAMPLEBINS := $(foreach e,$(EXAMPLES),$(BUILD)/$(firstword $(subst :, ,$(e))))
 
-.PHONY: all lib tests test valgrind clean
+# Benchmarks (bench/), built by `make bench`, not by `all`.
+BENCHES := BenchWide BenchStreams
+BENCHBINS := $(BENCHES:%=$(BUILD)/%)
+# Generated inputs, the same sizes as alibfyaml's; large, so in build/.
+WIDE := $(BUILD)/wide.yaml
+MANYDOCS := $(BUILD)/manydocs.yaml
+RUNS ?= 10
+
+.PHONY: all lib tests test valgrind bench clean
 
 all: lib tests
 
 lib: $(LIBOBJS)
 
-tests: $(TESTBINS) $(HALTBINS)
+tests: $(TESTBINS) $(HALTBINS) $(EXAMPLEBINS)
 
 $(BUILD):
 	mkdir -p $@
@@ -67,6 +82,31 @@ $(BUILD)/Test%: test/Test%.Mod $(LIBOBJS) $(SUPPOBJS) | $(BUILD)
 $(BUILD)/Halt%: test/Halt%.Mod $(LIBOBJS) | $(BUILD)
 	cd $(BUILD) && $(VOC) $(VOCFLAGS) ../$< -m
 
+$(BUILD)/Example%: examples/Example%.Mod $(LIBOBJS) | $(BUILD)
+	cd $(BUILD) && $(VOC) $(VOCFLAGS) ../$< -m
+
+$(BUILD)/Timing.o: bench/Timing.Mod | $(BUILD)
+	cd $(BUILD) && $(VOC) $(VOCFLAGS) -s ../$<
+
+$(BUILD)/Bench%: bench/Bench%.Mod $(LIBOBJS) $(BUILD)/Timing.o | $(BUILD)
+	cd $(BUILD) && $(VOC) $(VOCFLAGS) ../$< -m
+
+$(WIDE): bench/gen_wide.py | $(BUILD)
+	python3 bench/gen_wide.py 200000 $@
+
+$(MANYDOCS): bench/gen_manydocs.py | $(BUILD)
+	python3 bench/gen_manydocs.py 20000 $@
+
+# Each benchmark $(RUNS) times: n/mean/min/max/stddev of elapsed_seconds.
+bench: $(BENCHBINS) $(WIDE) $(MANYDOCS)
+	@$(BUILD)/BenchWide $(WIDE) | grep -v elapsed
+	@$(BUILD)/BenchStreams $(MANYDOCS) | grep -v elapsed
+	@for p in typed nav thin parse; do \
+	  printf 'BenchWide %-6s ' $$p; bench/run_stats.sh $(RUNS) $(BUILD)/BenchWide $(WIDE) $$p; \
+	done
+	@printf 'BenchStreams       '; bench/run_stats.sh $(RUNS) $(BUILD)/BenchStreams $(MANYDOCS)
+	@printf 'BenchStreams gc    '; bench/run_stats.sh $(RUNS) $(BUILD)/BenchStreams $(MANYDOCS) gc
+
 # Run every test from test/ (fixtures are relative to it); report all,
 # fail at the end if any failed. Each halt test must exit with exactly
 # its listed status.
@@ -79,6 +119,13 @@ test: tests
 	  (cd test && ../$(BUILD)/$$t); got=$$?; \
 	  if [ $$got -eq $$want ]; then echo "ok   - $$t halted with $$got"; \
 	  else echo "FAIL - $$t exited with $$got, not $$want"; status=1; fi; \
+	done; \
+	for x in $(EXAMPLES); do \
+	  e=$${x%%:*}; want=$${x##*:}; \
+	  echo "== $$e (must exit $$want with examples/$$e.expected)"; \
+	  (cd examples && ../$(BUILD)/$$e) > $(BUILD)/$$e.out; got=$$?; \
+	  if [ $$got -eq $$want ] && cmp -s $(BUILD)/$$e.out examples/$$e.expected; then echo "ok   - $$e"; \
+	  else echo "FAIL - $$e: exit $$got, output:"; diff examples/$$e.expected $(BUILD)/$$e.out; status=1; fi; \
 	done; exit $$status
 
 # Besides definite/indirect leaks, still-reachable must be exactly

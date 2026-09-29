@@ -647,12 +647,70 @@ valgrind, with findings written into this file.
      stream resolves each document as it is loaded.
    - An unterminated flow sequence is reported at the start of the
      next line (`(string-in-memory):5:1`), not where it opened.
-6. **Hardening and docs.** Benchmarks like alibfyaml's `bench/`
-   (wide document, many documents) to measure the per-navigation
-   `Node` allocation. A README with a usage example, and example
-   programs showing gcc-style error reporting. Decide whether to add
-   `ParseFromFile` for an open `Files.File` or stdin (the counterpart
-   of alibfyaml's `Text_IO`), and timestamps.
+6. **`[done]` Hardening and docs.**
+   - **Benchmarks** (`bench/`, `make bench`): `BenchWide` and
+     `BenchStreams`, on alibfyaml's generators and sizes (200,000
+     entities; 20,000 documents), giving alibfyaml's checksums
+     exactly (55002038890, 200158890). `BenchWide` times four passes:
+     *typed* (alibfyaml's work), *nav* (`Value` + `ScalarLen` only),
+     *thin* (nav through `FyThin`, no Nodes) and *parse* alone.
+     `bench/run_stats.sh` now takes any command. Means of 10 runs on
+     the development machine:
+
+     | | before | after | alibfyaml |
+     |---|---|---|---|
+     | wide, typed (incl. parse) | 1.158 s | 0.832 s | 0.967 s |
+     | wide, parse only | 0.618 s | 0.630 s | |
+     | wide, nav | 0.153 s | 0.153 s | |
+     | wide, thin | 0.097 s | 0.097 s | |
+     | streams | 0.095 s | 0.080 s | 0.060 s |
+
+   - **Allocation drives voc's GC, and the GC dominated.** perf put
+     about a quarter of the typed pass (half of the accessor time) in
+     voc's collector (`Heap_Sift`, `Heap_NEWREC`, `Heap_MarkCandidates`,
+     `Heap_HeapSort`). voc collects whenever its small heap fills,
+     keeping only a fifth of it free (`Heap.NEWREC`), and every
+     collection scans the whole stack conservatively, including
+     `GC`'s own 10,000-word candidate array, and heap-sorts the
+     candidates. So each collection has a large fixed cost, and a
+     program that allocates a lot of short-lived garbage collects
+     very often. The typed and field accessors made three garbage
+     objects per call (a `Node` from the lookup, a trimmed copy of
+     the text, a buffer for `strtod`). They now look fields up by raw
+     handle and convert from a 64-byte stack buffer (the heap only for
+     longer text, tested with 65- and 70-character values), allocating
+     only to build an `Error`. The accessors went from about 0.54 s
+     to 0.20 s. No API change.
+   - **Decided: `Node` stays a heap object.** nav minus thin is what a
+     `Node` per navigation step costs: about 56 ns (1M Nodes in
+     0.056 s), mostly GC. That's noticeable only on navigation-only
+     workloads, and the API relies on it (functions can't return
+     records). Internal paths that don't hand a Node to the caller
+     should use handles, as the accessors now do.
+   - The remaining streams gap is mostly the per-document `Document`
+     object and its finalizer registration, i.e. the ownership model.
+   - **Examples** (`examples/`): `ExampleConfig` (the README's),
+     `ExampleSyntaxError`, `ExampleValueError`, `ExampleMissingField`,
+     counterparts of alibfyaml's. They're much shorter, because
+     `err.msg` is already a located gcc diagnostic. `make test` builds
+     and runs each and requires its exit status and output identical
+     to `examples/<name>.expected` (changing a column in one made it
+     fail with a diff).
+   - **README.md**: requirements, building, using the modules from
+     another program (the commands were run as written in a scratch
+     directory), the example, concepts, error kinds and halt codes,
+     and Oberon-2 pitfalls.
+   - `make clean && make test` from scratch passes, and a second
+     `make` does nothing.
+
+   Found while doing it, confirmed live:
+   - **voc's `Out` buffers until `Out.Ln` or `Out.Flush`, and
+     `Platform.Exit` doesn't flush it**: an example that printed
+     `err.msg` (which ends in its own newline) and then exited lost
+     it.
+   - **C argument evaluation order is unspecified**, and voc compiles
+     to C: `Report(Fyaml.ParseFile(p, err), err)` may read `err`
+     before the call sets it. Caught while writing an example.
 
 ## Open questions
 
@@ -678,12 +736,21 @@ valgrind, with findings written into this file.
   (LONGINT), and every `size_t` needs HUGEINT or SYSTEM.ADDRESS.
   Consequence: code using the binding must be compiled with `-OC`
   too, because models can't be mixed; say so in the README.
-- **`Node` as heap object versus record.** It is a heap object, because
-  functions can't return records. Revisit only if Phase 6 benchmarks
-  show allocation dominating.
-- **Timestamps.** alibfyaml's plan covers them (YAML 1.1 grammar), but
-  voc has no standard date/time type to return. `ethDates` exists in
-  voc's library. Defer until there's a consumer.
-- **Warn on extra documents in `ParseString`/`ParseFile`?** Still open
-  in alibfyaml too. Default: stay silent, and point multi-document
-  input at `FyamlStreams`.
+- ~~**`Node` as heap object versus record.**~~ Decided in Phase 6: it
+  stays a heap object. A `Node` per navigation step costs about 56 ns;
+  allocation did dominate the typed accessors, which was fixed inside
+  the binding by not making Nodes (or strings) that never reach the
+  caller.
+- ~~**Reading from an open `Files.File` or stdin**~~ (alibfyaml's
+  `Text_IO`). Decided in Phase 6: not added. voc's `Files.File` gives
+  no C `FILE*` or descriptor to hand to libfyaml, and reading its
+  contents into a string for `ParseString` is a few lines for the
+  caller. stdin could be added cheaply
+  (`fy_document_build_from_fp(cfg, stdin)`) when a program needs it.
+- **Timestamps.** Still deferred (Phase 6): alibfyaml's plan covers
+  them (YAML 1.1 grammar), but voc has no standard date/time type to
+  return. `ethDates` exists in voc's library. Add them when a program
+  needs them.
+- ~~**Warn on extra documents in `ParseString`/`ParseFile`?**~~
+  Decided: stay silent, as documented on `ParseStringWith`, and point
+  multi-document input at `FyamlStreams`.

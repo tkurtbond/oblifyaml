@@ -1,0 +1,5 @@
+=== Parsing from a file ===
+malformed.yaml:3:1: error: flow sequence without a closing bracket
+
+=== Parsing the same text from a string ===
+(string-in-memory):3:1: error: flow sequence without a closing bracket

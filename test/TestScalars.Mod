@@ -39,6 +39,18 @@ BEGIN
   RETURN (err.msg[n] = 0AX) & (err.msg[n + 1] = 0X)
 END MsgIs;
 
+(* err.msg ends with suffix plus a newline. *)
+PROCEDURE IsSuffix(s: Fyaml.String; suffix: ARRAY OF CHAR): BOOLEAN;
+  VAR i, n, m: LONGINT;
+BEGIN
+  IF s = NIL THEN RETURN FALSE END;
+  n := 0; WHILE (n < LEN(suffix)) & (suffix[n] # 0X) DO INC(n) END;
+  m := 0; WHILE (m < LEN(s^)) & (s[m] # 0X) DO INC(m) END;
+  IF (m < n + 1) OR (s[m - 1] # 0AX) THEN RETURN FALSE END;
+  FOR i := 0 TO n - 1 DO IF s[m - 1 - n + i] # suffix[i] THEN RETURN FALSE END END;
+  RETURN TRUE
+END IsSuffix;
+
 PROCEDURE Failed(ok: BOOLEAN; kind: INTEGER; label: ARRAY OF CHAR);
 BEGIN Check.Check(~ok & (err # NIL) & (err.kind = kind), label)
 END Failed;
@@ -160,7 +172,7 @@ PROCEDURE Edges;
   VAR d: Fyaml.Document; m, n: Fyaml.Node; i: INTEGER; l: LONGINT; x: LONGREAL; ok: BOOLEAN;
 BEGIN
   d := Fyaml.ParseString(
-    "{lmin: -9223372036854775808, lmax: 9223372036854775807, lover: 9223372036854775808, lunder: -9223372036854775809, hmax: 0x7FFFFFFFFFFFFFFF, hmin: -0x8000000000000000, hover: 0x8000000000000000, imax: 2147483647, imin: -2147483648, iover: 2147483648, iunder: -2147483649, lead: .5, trail: 5., exp: 1.5E-2, bare: ., noexp: 1e, hex: 0x1A, inf: .inf, sep: 1_000.0, spaced: ' 42 ', prefix: 0x, plus: +7}",
+    "{lmin: -9223372036854775808, lmax: 9223372036854775807, lover: 9223372036854775808, lunder: -9223372036854775809, hmax: 0x7FFFFFFFFFFFFFFF, hmin: -0x8000000000000000, hover: 0x8000000000000000, imax: 2147483647, imin: -2147483648, iover: 2147483648, iunder: -2147483649, lead: .5, trail: 5., exp: 1.5E-2, bare: ., noexp: 1e, hex: 0x1A, inf: .inf, sep: 1_000.0, spaced: ' 42 ', prefix: 0x, plus: +7, lbin: 0b0111111111111111111111111111111111111111111111111111111111111111, lfloat: 1_000_000_000_000_000_000_000_000_000_000_000_000_000_000_000_000_000.5, lbad: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx}",
     err);
   m := d.Root();
   Check.Check(m.LongIntField("lmin", l, err) & (l = MIN(LONGINT)), "MIN(LONGINT) parses");
@@ -177,6 +189,10 @@ BEGIN
   Check.Check(m.LongIntField("iover", l, err) & (l = 2147483648), "...but fits LongIntField");
   Failed(m.IntegerField("prefix", i, err), Fyaml.DataError, "a bare 0x prefix is not an integer");
   Check.Check(m.IntegerField("plus", i, err) & (i = 7), "+7 = 7");
+  Check.Check(m.LongIntField("lbin", l, err) & (l = MAX(LONGINT)), "text longer than the inline buffer: 65-char 0b = MAX(LONGINT)");
+  Check.Check(m.LongRealField("lfloat", x, err) & (x = 1.0D51), "  ...a 70-char float with _ = 1.0e51");
+  Failed(m.IntegerField("lbad", i, err), Fyaml.DataError, "  ...and a malformed one is a DataError");
+  Check.Check(IsSuffix(err.msg, '"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"'), "  ...quoting all of it");
 
   Check.Check(m.LongRealField("lead", x, err) & (x = 0.5D0), ".5 = 0.5 (core schema; Ada rejects it)");
   Check.Check(m.LongRealField("trail", x, err) & (x = 5.0D0), "5. = 5.0 (core schema; Ada rejects it)");

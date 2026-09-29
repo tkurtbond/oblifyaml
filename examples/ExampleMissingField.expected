@@ -1,0 +1,2 @@
+missing_field.yaml: error: /1: missing required key "count"
+  near missing_field.yaml:3:9

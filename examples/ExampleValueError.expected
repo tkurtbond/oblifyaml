@@ -1,0 +1,7 @@
+=== Parsing from a file ===
+value_error.yaml:2:8: error: /count: not a valid integer: "banana"
+  (line 2, column 8, path /count)
+
+=== Parsing the same text from a string ===
+(string-in-memory):2:8: error: /count: not a valid integer: "banana"
+  (line 2, column 8, path /count)

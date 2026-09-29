@@ -114,6 +114,9 @@ TYPE
      which is also the "start over" value -- without this flag a Next
      after the end would silently restart from the first item
      (confirmed live, TestNavigate). *)
+  (* A scalar's trimmed text, for the typed accessors; see GetText. *)
+  Text = RECORD buf: ARRAY 64 OF CHAR; big: String; len: LONGINT END;
+
   ItemIter* = RECORD node: Node; prev: SYSTEM.ADDRESS; done: BOOLEAN END;
   PairIter* = RECORD node: Node; prev: SYSTEM.ADDRESS; done: BOOLEAN END;
 
@@ -629,35 +632,56 @@ BEGIN
   RETURN err
 END NodeError;
 
-(* A DataError about scalar n: 'what: "text"'. *)
-PROCEDURE ValueError(n: Node; what: ARRAY OF CHAR; s: String): Error;
-  VAR t: String; len: LONGINT;
+(* A scalar's trimmed text, held for conversion. Text up to
+   LEN(buf) - 1 bytes (every realistic number or boolean) is copied
+   into buf, on the stack, so converting it allocates nothing; longer
+   text goes into big. Converting allocates only on failure, to build
+   the Error: allocation drives voc's GC, which was about half of the
+   typed accessors' time before this (PLAN.md, Phase 6). *)
+PROCEDURE GetText(h: FyThin.Node; VAR t: Text);
+  VAR p, len: SYSTEM.ADDRESS; c: CHAR;
 BEGIN
-  t := NIL; len := 0;
-  Append(t, len, what); Append(t, len, ': "'); Append(t, len, s^); Append(t, len, '"');
-  RETURN NodeError(DataError, n, n.handle, t^)
+  p := FyThin.NodeGetScalar(h, len);
+  IF p = 0 THEN len := 0 END;
+  LOOP IF len = 0 THEN EXIT END; SYSTEM.GET(p, c); IF c # " " THEN EXIT END; INC(p); DEC(len) END;
+  LOOP IF len = 0 THEN EXIT END; SYSTEM.GET(p + len - 1, c); IF c # " " THEN EXIT END; DEC(len) END;
+  t.len := len; t.big := NIL;
+  IF len < LEN(t.buf) THEN
+    IF len > 0 THEN SYSTEM.MOVE(p, SYSTEM.ADR(t.buf[0]), len) END;
+    t.buf[len] := 0X
+  ELSE
+    t.big := FromBytes(p, len)
+  END
+END GetText;
+
+PROCEDURE TextString(VAR t: Text): String;
+BEGIN
+  IF t.big # NIL THEN RETURN t.big END;
+  RETURN FromBytes(SYSTEM.ADR(t.buf[0]), t.len)
+END TextString;
+
+(* A DataError about scalar h of d: 'what: "text"'. *)
+PROCEDURE ValueError(d: Document; h: FyThin.Node; what: ARRAY OF CHAR; VAR t: Text): Error;
+  VAR m, s: String; len: LONGINT;
+BEGIN
+  m := NIL; len := 0; s := TextString(t);
+  Append(m, len, what); Append(m, len, ': "'); Append(m, len, s^); Append(m, len, '"');
+  RETURN NodeError(DataError, NewNode(d, h), h, m^)
 END ValueError;
 
-(* The scalar's text without leading or trailing blanks. *)
-PROCEDURE Trimmed(n: Node): String;
-  VAR p, len, a, b: SYSTEM.ADDRESS; c: CHAR;
-BEGIN
-  p := ScalarBytes(n, len);
-  a := 0; b := len;
-  LOOP IF a = b THEN EXIT END; SYSTEM.GET(p + a, c); IF c # " " THEN EXIT END; INC(a) END;
-  LOOP IF b = a THEN EXIT END; SYSTEM.GET(p + b - 1, c); IF c # " " THEN EXIT END; DEC(b) END;
-  RETURN FromBytes(p + a, b - a)
-END Trimmed;
-
-(* s up to its terminating 0X equals lit. s may hold an embedded 0X,
-   which then makes it differ. *)
-PROCEDURE Is(s: String; lit: ARRAY OF CHAR): BOOLEAN;
+(* The n bytes of s equal lit. An embedded 0X makes them differ. *)
+PROCEDURE Is(VAR s: ARRAY OF CHAR; n: LONGINT; lit: ARRAY OF CHAR): BOOLEAN;
   VAR i: LONGINT;
 BEGIN
-  IF LEN(s^) - 1 # Length(lit) THEN RETURN FALSE END;
-  FOR i := 0 TO LEN(s^) - 2 DO IF s[i] # lit[i] THEN RETURN FALSE END END;
+  IF n # Length(lit) THEN RETURN FALSE END;
+  FOR i := 0 TO n - 1 DO IF s[i] # lit[i] THEN RETURN FALSE END END;
   RETURN TRUE
 END Is;
+
+PROCEDURE TextIs(VAR t: Text; lit: ARRAY OF CHAR): BOOLEAN;
+BEGIN
+  IF t.big = NIL THEN RETURN Is(t.buf, t.len, lit) ELSE RETURN Is(t.big^, t.len, lit) END
+END TextIs;
 
 (* A digit's value, or 99 for anything else. *)
 PROCEDURE DigitVal(c: CHAR): INTEGER;
@@ -670,11 +694,11 @@ BEGIN
 END DigitVal;
 
 (* The length of the run digit {["_"] digit} of base-digits at s[i],
-   or 0 if s[i] isn't one. *)
-PROCEDURE DigitRun(s: String; i: LONGINT; base: INTEGER): LONGINT;
-  VAR j, n: LONGINT;
+   within the first n bytes of s, or 0 if s[i] isn't one. *)
+PROCEDURE DigitRun(VAR s: ARRAY OF CHAR; n, i: LONGINT; base: INTEGER): LONGINT;
+  VAR j: LONGINT;
 BEGIN
-  n := LEN(s^) - 1; j := i;
+  j := i;
   IF (j >= n) OR (DigitVal(s[j]) >= base) THEN RETURN 0 END;
   INC(j);
   LOOP
@@ -687,17 +711,18 @@ BEGIN
   RETURN j - i
 END DigitRun;
 
-(* Parses s as an integer. FALSE if it doesn't match the grammar;
-   otherwise TRUE, with overflow set if it is outside LONGINT.
+(* Parses the n bytes of s as an integer. FALSE if they don't match
+   the grammar; otherwise TRUE, with overflow set if the value is
+   outside LONGINT.
 
    The value is built negatively, Java's Long.parseLong way, so that
    MIN(LONGINT) parses. voc's DIV of a negative number near
    MIN(LONGINT) overflows ((MIN(LONGINT) + 9) DIV 10 came out
    positive, confirmed live), so every DIV here is of MAX(LONGINT). *)
-PROCEDURE ParseInt(s: String; VAR v: LONGINT; VAR overflow: BOOLEAN): BOOLEAN;
-  VAR i, n, r, limit, multmin: LONGINT; neg: BOOLEAN; base, d: INTEGER;
+PROCEDURE ParseInt(VAR s: ARRAY OF CHAR; n: LONGINT; VAR v: LONGINT; VAR overflow: BOOLEAN): BOOLEAN;
+  VAR i, r, limit, multmin: LONGINT; neg: BOOLEAN; base, d: INTEGER;
 BEGIN
-  n := LEN(s^) - 1; i := 0; neg := FALSE; overflow := FALSE;
+  i := 0; neg := FALSE; overflow := FALSE;
   IF (n > 0) & ((s[0] = "+") OR (s[0] = "-")) THEN neg := s[0] = "-"; i := 1 END;
   base := 10;
   IF (n - i >= 2) & (s[i] = "0") THEN
@@ -706,7 +731,7 @@ BEGIN
     ELSIF s[i + 1] = "b" THEN base := 2; INC(i, 2)
     END
   END;
-  IF (i = n) OR (DigitRun(s, i, base) # n - i) THEN RETURN FALSE END;
+  IF (i = n) OR (DigitRun(s, n, i, base) # n - i) THEN RETURN FALSE END;
   IF neg THEN   (* limit = MIN(LONGINT); multmin = limit / base, truncated *)
     limit := MIN(LONGINT);
     multmin := -(MAX(LONGINT) DIV base + (MAX(LONGINT) MOD base + 1) DIV base)
@@ -728,132 +753,191 @@ BEGIN
   RETURN TRUE
 END ParseInt;
 
-(* Checks s against the float grammar; if it matches, buf is s without
-   its "_"s, ready for strtod. *)
-PROCEDURE FloatText(s: String; VAR buf: String): BOOLEAN;
-  VAR i, n, k, intLen, fracLen: LONGINT;
+PROCEDURE TextInt(VAR t: Text; VAR v: LONGINT; VAR overflow: BOOLEAN): BOOLEAN;
 BEGIN
-  n := LEN(s^) - 1; i := 0;
+  IF t.big = NIL THEN RETURN ParseInt(t.buf, t.len, v, overflow)
+  ELSE RETURN ParseInt(t.big^, t.len, v, overflow)
+  END
+END TextInt;
+
+(* TRUE if the n bytes of s match the float grammar. *)
+PROCEDURE IsFloat(VAR s: ARRAY OF CHAR; n: LONGINT): BOOLEAN;
+  VAR i, k, intLen, fracLen: LONGINT;
+BEGIN
+  i := 0;
   IF (n > 0) & ((s[0] = "+") OR (s[0] = "-")) THEN i := 1 END;
-  intLen := DigitRun(s, i, 10); INC(i, intLen);
+  intLen := DigitRun(s, n, i, 10); INC(i, intLen);
   fracLen := 0;
-  IF (i < n) & (s[i] = ".") THEN INC(i); fracLen := DigitRun(s, i, 10); INC(i, fracLen) END;
+  IF (i < n) & (s[i] = ".") THEN INC(i); fracLen := DigitRun(s, n, i, 10); INC(i, fracLen) END;
   IF intLen + fracLen = 0 THEN RETURN FALSE END;
   IF (i < n) & ((s[i] = "e") OR (s[i] = "E")) THEN
     INC(i);
     IF (i < n) & ((s[i] = "+") OR (s[i] = "-")) THEN INC(i) END;
-    k := DigitRun(s, i, 10);
+    k := DigitRun(s, n, i, 10);
     IF k = 0 THEN RETURN FALSE END;
     INC(i, k)
   END;
-  IF i # n THEN RETURN FALSE END;
-  NEW(buf, n + 1); k := 0;
-  FOR i := 0 TO n - 1 DO IF s[i] # "_" THEN buf[k] := s[i]; INC(k) END END;
-  buf[k] := 0X;
-  RETURN TRUE
-END FloatText;
+  RETURN i = n
+END IsFloat;
 
-PROCEDURE IsNullText(s: String): BOOLEAN;
-BEGIN RETURN Is(s, "~") OR Is(s, "null") OR Is(s, "Null") OR Is(s, "NULL")
+(* strtod of the n bytes of s (already checked by IsFloat) without
+   their "_"s, via out, which must hold n + 1 bytes. *)
+PROCEDURE Strtod(VAR s: ARRAY OF CHAR; n: LONGINT; VAR out: ARRAY OF CHAR): LONGREAL;
+  VAR i, k: LONGINT;
+BEGIN
+  k := 0;
+  FOR i := 0 TO n - 1 DO IF s[i] # "_" THEN out[k] := s[i]; INC(k) END END;
+  out[k] := 0X;
+  RETURN FyThin.Strtod(SYSTEM.ADR(out[0]))
+END Strtod;
+
+(* The float value of t, or FALSE if it doesn't match the grammar. *)
+PROCEDURE TextFloat(VAR t: Text; VAR x: LONGREAL): BOOLEAN;
+  VAR out: ARRAY 64 OF CHAR; big: String;
+BEGIN
+  IF t.big = NIL THEN
+    IF ~IsFloat(t.buf, t.len) THEN RETURN FALSE END;
+    x := Strtod(t.buf, t.len, out)  (* t.len < LEN(t.buf) = LEN(out) *)
+  ELSE
+    IF ~IsFloat(t.big^, t.len) THEN RETURN FALSE END;
+    NEW(big, t.len + 1); x := Strtod(t.big^, t.len, big^)
+  END;
+  RETURN TRUE
+END TextFloat;
+
+PROCEDURE IsNullText(VAR t: Text): BOOLEAN;
+BEGIN RETURN TextIs(t, "~") OR TextIs(t, "null") OR TextIs(t, "Null") OR TextIs(t, "NULL")
 END IsNullText;
 
-PROCEDURE IsTrueText(s: String): BOOLEAN;
-BEGIN RETURN Is(s, "true") OR Is(s, "True") OR Is(s, "TRUE")
+PROCEDURE IsTrueText(VAR t: Text): BOOLEAN;
+BEGIN RETURN TextIs(t, "true") OR TextIs(t, "True") OR TextIs(t, "TRUE")
 END IsTrueText;
 
-PROCEDURE IsFalseText(s: String): BOOLEAN;
-BEGIN RETURN Is(s, "false") OR Is(s, "False") OR Is(s, "FALSE")
+PROCEDURE IsFalseText(VAR t: Text): BOOLEAN;
+BEGIN RETURN TextIs(t, "false") OR TextIs(t, "False") OR TextIs(t, "FALSE")
 END IsFalseText;
+
+(* The conversions, on scalar h of d. FALSE and a DataError if the
+   text doesn't fit; v is then unchanged. *)
+PROCEDURE LongIntOf(d: Document; h: FyThin.Node; VAR v: LONGINT; VAR err: Error): BOOLEAN;
+  VAR t: Text; x: LONGINT; overflow: BOOLEAN;
+BEGIN
+  err := NIL; GetText(h, t);
+  IF ~TextInt(t, x, overflow) THEN err := ValueError(d, h, "not a valid integer", t); RETURN FALSE END;
+  IF overflow THEN err := ValueError(d, h, "integer out of range", t); RETURN FALSE END;
+  v := x;
+  RETURN TRUE
+END LongIntOf;
+
+PROCEDURE IntegerOf(d: Document; h: FyThin.Node; VAR v: INTEGER; VAR err: Error): BOOLEAN;
+  VAR x: LONGINT; t: Text;
+BEGIN
+  IF ~LongIntOf(d, h, x, err) THEN RETURN FALSE END;
+  IF (x < MIN(INTEGER)) OR (x > MAX(INTEGER)) THEN
+    GetText(h, t); err := ValueError(d, h, "integer out of range", t); RETURN FALSE
+  END;
+  v := SHORT(x);
+  RETURN TRUE
+END IntegerOf;
+
+PROCEDURE LongRealOf(d: Document; h: FyThin.Node; VAR v: LONGREAL; VAR err: Error): BOOLEAN;
+  VAR t: Text; x: LONGREAL;
+BEGIN
+  err := NIL; GetText(h, t);
+  IF ~TextFloat(t, x) THEN err := ValueError(d, h, "not a valid float", t); RETURN FALSE END;
+  IF ABS(x) > MAX(LONGREAL) THEN err := ValueError(d, h, "float out of range", t); RETURN FALSE END;
+  v := x;
+  RETURN TRUE
+END LongRealOf;
+
+(* A value beyond MAX(REAL) is out of range even if it would round
+   down to MAX(REAL). *)
+PROCEDURE RealOf(d: Document; h: FyThin.Node; VAR v: REAL; VAR err: Error): BOOLEAN;
+  VAR x: LONGREAL; t: Text;
+BEGIN
+  IF ~LongRealOf(d, h, x, err) THEN RETURN FALSE END;
+  IF ABS(x) > MAX(REAL) THEN GetText(h, t); err := ValueError(d, h, "float out of range", t); RETURN FALSE END;
+  v := SHORT(x);
+  RETURN TRUE
+END RealOf;
+
+PROCEDURE BooleanOf(d: Document; h: FyThin.Node; VAR v: BOOLEAN; VAR err: Error): BOOLEAN;
+  VAR t: Text;
+BEGIN
+  err := NIL; GetText(h, t);
+  IF IsTrueText(t) THEN v := TRUE
+  ELSIF IsFalseText(t) THEN v := FALSE
+  ELSE err := ValueError(d, h, "not a valid boolean", t); RETURN FALSE
+  END;
+  RETURN TRUE
+END BooleanOf;
 
 (* TRUE if n is null: an empty plain scalar ("key:" with nothing
    after), or a plain scalar whose text is ~, null, Null or NULL. A
    quoted scalar is a string, never null, as in YAML's core schema
    (alibfyaml counts a quoted "null" as null). Any kind of node may be
-   asked;
-   an alias is never null (its text is the anchor's name, and asking
-   libfyaml reads uninitialised memory -- slibfyaml, under valgrind). *)
+   asked; an alias is never null (its text is the anchor's name, and
+   asking libfyaml reads uninitialised memory -- slibfyaml, under
+   valgrind). *)
 PROCEDURE (n: Node) IsNullValue*(): BOOLEAN;
+  VAR t: Text;
 BEGIN
   Live(n);
   IF FyThin.NodeIsAlias(n.handle) THEN RETURN FALSE END;
-  RETURN FyThin.NodeIsNull(n.handle)
-    OR (n.IsScalar() & FyThin.NodeIsPlain(n.handle) & IsNullText(Trimmed(n)))
+  IF FyThin.NodeIsNull(n.handle) THEN RETURN TRUE END;
+  IF ~FyThin.NodeIsScalar(n.handle) OR ~FyThin.NodeIsPlain(n.handle) THEN RETURN FALSE END;
+  GetText(n.handle, t);
+  RETURN IsNullText(t)
 END IsNullValue;
 
 (* Whether the text fits each grammar (without checking the range).
    FALSE for a sequence or mapping. *)
 PROCEDURE (n: Node) IsInteger*(): BOOLEAN;
-  VAR v: LONGINT; overflow: BOOLEAN;
-BEGIN RETURN n.IsScalar() & ParseInt(Trimmed(n), v, overflow)
+  VAR t: Text; v: LONGINT; overflow: BOOLEAN;
+BEGIN
+  IF ~n.IsScalar() THEN RETURN FALSE END;
+  GetText(n.handle, t);
+  RETURN TextInt(t, v, overflow)
 END IsInteger;
 
 PROCEDURE (n: Node) IsReal*(): BOOLEAN;
-  VAR buf: String;
-BEGIN RETURN n.IsScalar() & FloatText(Trimmed(n), buf)
+  VAR t: Text;
+BEGIN
+  IF ~n.IsScalar() THEN RETURN FALSE END;
+  GetText(n.handle, t);
+  IF t.big = NIL THEN RETURN IsFloat(t.buf, t.len) ELSE RETURN IsFloat(t.big^, t.len) END
 END IsReal;
 
 PROCEDURE (n: Node) IsBoolean*(): BOOLEAN;
-  VAR s: String;
+  VAR t: Text;
 BEGIN
   IF ~n.IsScalar() THEN RETURN FALSE END;
-  s := Trimmed(n);
-  RETURN IsTrueText(s) OR IsFalseText(s)
+  GetText(n.handle, t);
+  RETURN IsTrueText(t) OR IsFalseText(t)
 END IsBoolean;
 
 (* The typed value of scalar n (halts with AssertKind for a sequence
    or mapping). FALSE and a DataError if the text doesn't fit. *)
 PROCEDURE (n: Node) LongIntValue*(VAR v: LONGINT; VAR err: Error): BOOLEAN;
-  VAR s: String; x: LONGINT; overflow: BOOLEAN;
-BEGIN
-  err := NIL; s := Trimmed(n);
-  IF ~ParseInt(s, x, overflow) THEN err := ValueError(n, "not a valid integer", s); RETURN FALSE END;
-  IF overflow THEN err := ValueError(n, "integer out of range", s); RETURN FALSE END;
-  v := x;
-  RETURN TRUE
+BEGIN ASSERT(n.IsScalar(), AssertKind); RETURN LongIntOf(n.doc, n.handle, v, err)
 END LongIntValue;
 
 PROCEDURE (n: Node) IntegerValue*(VAR v: INTEGER; VAR err: Error): BOOLEAN;
-  VAR x: LONGINT;
-BEGIN
-  IF ~n.LongIntValue(x, err) THEN RETURN FALSE END;
-  IF (x < MIN(INTEGER)) OR (x > MAX(INTEGER)) THEN
-    err := ValueError(n, "integer out of range", Trimmed(n)); RETURN FALSE
-  END;
-  v := SHORT(x);
-  RETURN TRUE
+BEGIN ASSERT(n.IsScalar(), AssertKind); RETURN IntegerOf(n.doc, n.handle, v, err)
 END IntegerValue;
 
 PROCEDURE (n: Node) LongRealValue*(VAR v: LONGREAL; VAR err: Error): BOOLEAN;
-  VAR s, buf: String; x: LONGREAL;
-BEGIN
-  err := NIL; s := Trimmed(n);
-  IF ~FloatText(s, buf) THEN err := ValueError(n, "not a valid float", s); RETURN FALSE END;
-  x := FyThin.Strtod(SYSTEM.ADR(buf[0]));
-  IF ABS(x) > MAX(LONGREAL) THEN err := ValueError(n, "float out of range", s); RETURN FALSE END;
-  v := x;
-  RETURN TRUE
+BEGIN ASSERT(n.IsScalar(), AssertKind); RETURN LongRealOf(n.doc, n.handle, v, err)
 END LongRealValue;
 
 (* A value beyond MAX(REAL) is out of range even if it would round
    down to MAX(REAL). *)
 PROCEDURE (n: Node) RealValue*(VAR v: REAL; VAR err: Error): BOOLEAN;
-  VAR x: LONGREAL;
-BEGIN
-  IF ~n.LongRealValue(x, err) THEN RETURN FALSE END;
-  IF ABS(x) > MAX(REAL) THEN err := ValueError(n, "float out of range", Trimmed(n)); RETURN FALSE END;
-  v := SHORT(x);
-  RETURN TRUE
+BEGIN ASSERT(n.IsScalar(), AssertKind); RETURN RealOf(n.doc, n.handle, v, err)
 END RealValue;
 
 PROCEDURE (n: Node) BooleanValue*(VAR v: BOOLEAN; VAR err: Error): BOOLEAN;
-  VAR s: String;
-BEGIN
-  err := NIL; s := Trimmed(n);
-  IF IsTrueText(s) THEN v := TRUE
-  ELSIF IsFalseText(s) THEN v := FALSE
-  ELSE err := ValueError(n, "not a valid boolean", s); RETURN FALSE
-  END;
-  RETURN TRUE
+BEGIN ASSERT(n.IsScalar(), AssertKind); RETURN BooleanOf(n.doc, n.handle, v, err)
 END BooleanValue;
 
 (* ---- Mapping fields ----
@@ -873,26 +957,28 @@ BEGIN
   RETURN NodeError(MissingKey, m, 0, t^)
 END Missing;
 
-(* The scalar value for key. NIL if there is none, with err: a
-   MissingKey if required, else NIL. NIL and a DataError if the value
-   isn't a scalar, located at its key. *)
-PROCEDURE FieldValue(m: Node; VAR key: ARRAY OF CHAR; required: BOOLEAN; VAR err: Error): Node;
-  VAR v: Node;
+(* The scalar value for key, as a handle: no Node is made, since the
+   caller only converts it. 0 if there is none, with err: a MissingKey
+   if required, else NIL. 0 and a DataError if the value isn't a
+   scalar, located at its key. *)
+PROCEDURE FieldHandle(m: Node; VAR key: ARRAY OF CHAR; required: BOOLEAN; VAR err: Error): FyThin.Node;
+  VAR h: FyThin.Node;
 BEGIN
   err := NIL;
-  v := m.Value(key);
-  IF v = NIL THEN
+  ASSERT(m.IsMapping(), AssertKind);
+  h := FyThin.NodeMappingLookupValueByString(m.handle, SYSTEM.ADR(key[0]), Length(key));
+  IF h = 0 THEN
     IF required THEN err := Missing(m, key) END;
-    RETURN NIL
+    RETURN 0
   END;
-  IF ~v.IsScalar() THEN
-    err := NodeError(DataError, v,
+  IF ~FyThin.NodeIsScalar(h) THEN
+    err := NodeError(DataError, NewNode(m.doc, h),
       FyThin.NodeMappingLookupKeyByString(m.handle, SYSTEM.ADR(key[0]), Length(key)),
       "not a scalar value");
-    RETURN NIL
+    RETURN 0
   END;
-  RETURN v
-END FieldValue;
+  RETURN h
+END FieldHandle;
 
 (* The value for key, of any kind; NIL and a MissingKey error if there
    is none. *)
@@ -905,96 +991,105 @@ BEGIN
 END Required;
 
 PROCEDURE (m: Node) LongIntField*(key: ARRAY OF CHAR; VAR v: LONGINT; VAR err: Error): BOOLEAN;
-  VAR n: Node;
-BEGIN n := FieldValue(m, key, TRUE, err); RETURN (n # NIL) & n.LongIntValue(v, err)
+  VAR h: FyThin.Node;
+BEGIN h := FieldHandle(m, key, TRUE, err); RETURN (h # 0) & LongIntOf(m.doc, h, v, err)
 END LongIntField;
 
 PROCEDURE (m: Node) LongIntFieldOr*(key: ARRAY OF CHAR; default: LONGINT; VAR v: LONGINT;
                                      VAR err: Error): BOOLEAN;
-  VAR n: Node;
+  VAR h: FyThin.Node;
 BEGIN
-  n := FieldValue(m, key, FALSE, err);
-  IF n # NIL THEN RETURN n.LongIntValue(v, err) END;
+  h := FieldHandle(m, key, FALSE, err);
+  IF h # 0 THEN RETURN LongIntOf(m.doc, h, v, err) END;
   IF err = NIL THEN v := default END;
   RETURN err = NIL
 END LongIntFieldOr;
 
 PROCEDURE (m: Node) IntegerField*(key: ARRAY OF CHAR; VAR v: INTEGER; VAR err: Error): BOOLEAN;
-  VAR n: Node;
-BEGIN n := FieldValue(m, key, TRUE, err); RETURN (n # NIL) & n.IntegerValue(v, err)
+  VAR h: FyThin.Node;
+BEGIN h := FieldHandle(m, key, TRUE, err); RETURN (h # 0) & IntegerOf(m.doc, h, v, err)
 END IntegerField;
 
 PROCEDURE (m: Node) IntegerFieldOr*(key: ARRAY OF CHAR; default: INTEGER; VAR v: INTEGER;
                                      VAR err: Error): BOOLEAN;
-  VAR n: Node;
+  VAR h: FyThin.Node;
 BEGIN
-  n := FieldValue(m, key, FALSE, err);
-  IF n # NIL THEN RETURN n.IntegerValue(v, err) END;
+  h := FieldHandle(m, key, FALSE, err);
+  IF h # 0 THEN RETURN IntegerOf(m.doc, h, v, err) END;
   IF err = NIL THEN v := default END;
   RETURN err = NIL
 END IntegerFieldOr;
 
 PROCEDURE (m: Node) LongRealField*(key: ARRAY OF CHAR; VAR v: LONGREAL; VAR err: Error): BOOLEAN;
-  VAR n: Node;
-BEGIN n := FieldValue(m, key, TRUE, err); RETURN (n # NIL) & n.LongRealValue(v, err)
+  VAR h: FyThin.Node;
+BEGIN h := FieldHandle(m, key, TRUE, err); RETURN (h # 0) & LongRealOf(m.doc, h, v, err)
 END LongRealField;
 
 PROCEDURE (m: Node) LongRealFieldOr*(key: ARRAY OF CHAR; default: LONGREAL; VAR v: LONGREAL;
                                       VAR err: Error): BOOLEAN;
-  VAR n: Node;
+  VAR h: FyThin.Node;
 BEGIN
-  n := FieldValue(m, key, FALSE, err);
-  IF n # NIL THEN RETURN n.LongRealValue(v, err) END;
+  h := FieldHandle(m, key, FALSE, err);
+  IF h # 0 THEN RETURN LongRealOf(m.doc, h, v, err) END;
   IF err = NIL THEN v := default END;
   RETURN err = NIL
 END LongRealFieldOr;
 
 PROCEDURE (m: Node) RealField*(key: ARRAY OF CHAR; VAR v: REAL; VAR err: Error): BOOLEAN;
-  VAR n: Node;
-BEGIN n := FieldValue(m, key, TRUE, err); RETURN (n # NIL) & n.RealValue(v, err)
+  VAR h: FyThin.Node;
+BEGIN h := FieldHandle(m, key, TRUE, err); RETURN (h # 0) & RealOf(m.doc, h, v, err)
 END RealField;
 
 PROCEDURE (m: Node) RealFieldOr*(key: ARRAY OF CHAR; default: REAL; VAR v: REAL;
                                   VAR err: Error): BOOLEAN;
-  VAR n: Node;
+  VAR h: FyThin.Node;
 BEGIN
-  n := FieldValue(m, key, FALSE, err);
-  IF n # NIL THEN RETURN n.RealValue(v, err) END;
+  h := FieldHandle(m, key, FALSE, err);
+  IF h # 0 THEN RETURN RealOf(m.doc, h, v, err) END;
   IF err = NIL THEN v := default END;
   RETURN err = NIL
 END RealFieldOr;
 
 PROCEDURE (m: Node) BooleanField*(key: ARRAY OF CHAR; VAR v: BOOLEAN; VAR err: Error): BOOLEAN;
-  VAR n: Node;
-BEGIN n := FieldValue(m, key, TRUE, err); RETURN (n # NIL) & n.BooleanValue(v, err)
+  VAR h: FyThin.Node;
+BEGIN h := FieldHandle(m, key, TRUE, err); RETURN (h # 0) & BooleanOf(m.doc, h, v, err)
 END BooleanField;
 
 PROCEDURE (m: Node) BooleanFieldOr*(key: ARRAY OF CHAR; default: BOOLEAN; VAR v: BOOLEAN;
                                      VAR err: Error): BOOLEAN;
-  VAR n: Node;
+  VAR h: FyThin.Node;
 BEGIN
-  n := FieldValue(m, key, FALSE, err);
-  IF n # NIL THEN RETURN n.BooleanValue(v, err) END;
+  h := FieldHandle(m, key, FALSE, err);
+  IF h # 0 THEN RETURN BooleanOf(m.doc, h, v, err) END;
   IF err = NIL THEN v := default END;
   RETURN err = NIL
 END BooleanFieldOr;
 
+(* A copy of scalar h's text, untrimmed, as Scalar gives it. *)
+PROCEDURE ScalarString(h: FyThin.Node): String;
+  VAR p, len: SYSTEM.ADDRESS;
+BEGIN
+  p := FyThin.NodeGetScalar(h, len);
+  IF p = 0 THEN len := 0 END;
+  RETURN FromBytes(p, len)
+END ScalarString;
+
 (* The scalar's text as Scalar gives it (not trimmed). *)
 PROCEDURE (m: Node) StringField*(key: ARRAY OF CHAR; VAR s: String; VAR err: Error): BOOLEAN;
-  VAR n: Node;
+  VAR h: FyThin.Node;
 BEGIN
-  n := FieldValue(m, key, TRUE, err);
-  IF n = NIL THEN RETURN FALSE END;
-  s := n.Scalar();
+  h := FieldHandle(m, key, TRUE, err);
+  IF h = 0 THEN RETURN FALSE END;
+  s := ScalarString(h);
   RETURN TRUE
 END StringField;
 
 PROCEDURE (m: Node) StringFieldOr*(key: ARRAY OF CHAR; default: ARRAY OF CHAR; VAR s: String;
                                     VAR err: Error): BOOLEAN;
-  VAR n: Node;
+  VAR h: FyThin.Node;
 BEGIN
-  n := FieldValue(m, key, FALSE, err);
-  IF n # NIL THEN s := n.Scalar(); RETURN TRUE END;
+  h := FieldHandle(m, key, FALSE, err);
+  IF h # 0 THEN s := ScalarString(h); RETURN TRUE END;
   IF err = NIL THEN s := FromChars(default) END;
   RETURN err = NIL
 END StringFieldOr;

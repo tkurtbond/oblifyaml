@@ -40,9 +40,10 @@ export PATH=/usr/local/sw/versions/voc/git/bin:$PATH
 Use the `Makefile`; don't invoke voc by hand:
 
 ```sh
-make            # library + test programs, into build/
-make test       # run every test program (from test/, so fixtures resolve)
-make valgrind   # the same, each under valgrind
+make            # library, test programs and examples, into build/
+make test       # every test (from test/), halt test, and example (from examples/)
+make valgrind   # the test programs, each under valgrind
+make bench      # benchmarks (bench/); not part of `make` or `make test`
 make clean      # rm -rf build
 ```
 
@@ -181,6 +182,20 @@ which may keep pointing into it. See PLAN.md, "Buffer lifetime".
 - `Makefile`: build and test; see Build above.
 - `test/`: one main module per concern, plus `Check.Mod` and the YAML
   fixtures.
+- `examples/`: example programs with fixtures and `<name>.expected`
+  output. `make test` requires each one's exit status (listed as
+  `name:status` in the Makefile's `EXAMPLES`) and exact output, so a
+  changed message fails there. `ExampleConfig` is the README's example;
+  keep the README's copy in step with it. After changing an example
+  or a message, check the new output by hand, then regenerate its
+  `.expected` from the program.
+- `bench/`: `BenchWide`, `BenchStreams`, the shared `Timing` module,
+  alibfyaml's input generators, and `run_stats.sh`. `make bench`
+  generates the (large) inputs into `build/`, prints checksums (which
+  must match alibfyaml's: 55002038890 and 200158890), then 10-run
+  timing stats (`RUNS=n` to change). Record numbers in PLAN.md when
+  a change touches a hot path.
+- `README.md`: the user-facing guide.
 - `build/`: voc/gcc output (gitignored).
 - `PLAN.md`: design, decisions, confirmed findings, and open
   questions, organized by section. Append to the relevant section
@@ -250,6 +265,21 @@ which may keep pointing into it. See PLAN.md, "Buffer lifetime".
   32-bit `REAL` and never equals the `LONGREAL` 1234.56, but
   `1234.56D0` does, bit for bit with glibc's `strtod`. Write `D`
   literals when comparing `LONGREAL` results.
+- **voc's `Out` buffers until `Out.Ln` or `Out.Flush`, and
+  `Platform.Exit` doesn't flush it.** Printing `err.msg` (which ends in
+  its own newline) and then calling `Platform.Exit` loses the message
+  (confirmed live). Call `Out.Flush` before `Platform.Exit`.
+- **voc compiles to C, where argument evaluation order is
+  unspecified**: `Report(Fyaml.ParseFile(p, err), err)` may pass `err`
+  before `ParseFile` sets it. Assign the result first.
+- **Allocation is what makes voc programs slow.** voc collects
+  whenever its small heap fills (it keeps only a fifth free), and each
+  collection has a large fixed cost: a conservative scan of the whole
+  stack, including `Heap.GC`'s own 10,000-word candidate array, plus
+  a heap sort. On hot paths inside the binding, don't allocate objects
+  the caller never sees: use `FyThin` handles rather than `Node`s,
+  and stack buffers rather than `String`s (see `Fyaml.GetText`).
+  PLAN.md, Phase 6, has the measurements.
 - **Oberon-2 has no exceptions**, no generics, no closures, and
   function procedures can't return arrays or records. That shapes the
   API: results come back as `BOOLEAN` plus `VAR` out parameters or
