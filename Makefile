@@ -11,7 +11,7 @@
 
 VOC      ?= /usr/local/sw/versions/voc/git/bin/voc
 VOCFLAGS := -OC            # size model: decided in PLAN.md; never mix models
-VALGRIND ?= valgrind --leak-check=full --show-leak-kinds=definite,indirect --error-exitcode=99
+VALGRIND ?= valgrind --leak-check=full --show-leak-kinds=definite,indirect --error-exitcode=99 --suppressions=voc-gc.supp
 
 # voc reads LDLIBS from the environment itself when linking a main module.
 export LDLIBS := $(shell pkg-config --libs libfyaml)
@@ -19,15 +19,19 @@ export LDLIBS := $(shell pkg-config --libs libfyaml)
 BUILD := build
 
 # Library modules, in import order.
-LIBMODS := FyThin
+LIBMODS := FyThin Fyaml
 # Test support modules, in import order.
 TESTSUPPORT := Check
 # Test programs (test/<name>.Mod, each a main module).
-TESTS := TestThin
+TESTS := TestThin TestParseErrors TestQuickstart TestNavigate TestPath TestLiveness
+# Programs that must halt (test/<name>.Mod), as name:required-exit-status;
+# the status is one of Fyaml's Assert* codes.
+HALTTESTS := HaltClosed:61 HaltKind:62 HaltIndex:63
 
 LIBOBJS  := $(LIBMODS:%=$(BUILD)/%.o)
 SUPPOBJS := $(TESTSUPPORT:%=$(BUILD)/%.o)
 TESTBINS := $(TESTS:%=$(BUILD)/%)
+HALTBINS := $(foreach h,$(HALTTESTS),$(BUILD)/$(firstword $(subst :, ,$(h))))
 
 .PHONY: all lib tests test valgrind clean
 
@@ -35,7 +39,7 @@ all: lib tests
 
 lib: $(LIBOBJS)
 
-tests: $(TESTBINS)
+tests: $(TESTBINS) $(HALTBINS)
 
 $(BUILD):
 	mkdir -p $@
@@ -51,6 +55,7 @@ $(BUILD)/%.o: test/%.Mod | $(BUILD)
 # when, each module it imports. Add a line here for every new import
 # between library/support modules, e.g.
 #   $(BUILD)/Fyaml.o: $(BUILD)/FyThin.o
+$(BUILD)/Fyaml.o: $(BUILD)/FyThin.o
 $(SUPPOBJS): $(LIBOBJS)
 
 # Test programs: main modules (-m); voc links the imported modules'
@@ -58,11 +63,21 @@ $(SUPPOBJS): $(LIBOBJS)
 $(BUILD)/Test%: test/Test%.Mod $(LIBOBJS) $(SUPPOBJS) | $(BUILD)
 	cd $(BUILD) && $(VOC) $(VOCFLAGS) ../$< -m
 
+$(BUILD)/Halt%: test/Halt%.Mod $(LIBOBJS) | $(BUILD)
+	cd $(BUILD) && $(VOC) $(VOCFLAGS) ../$< -m
+
 # Run every test from test/ (fixtures are relative to it); report all,
-# fail at the end if any failed.
+# fail at the end if any failed. Each halt test must exit with exactly
+# its listed status.
 test: tests
 	@status=0; for t in $(TESTS); do \
 	  echo "== $$t"; (cd test && ../$(BUILD)/$$t) || status=1; \
+	done; \
+	for h in $(HALTTESTS); do \
+	  t=$${h%%:*}; want=$${h##*:}; echo "== $$t (must halt with $$want)"; \
+	  (cd test && ../$(BUILD)/$$t); got=$$?; \
+	  if [ $$got -eq $$want ]; then echo "ok   - $$t halted with $$got"; \
+	  else echo "FAIL - $$t exited with $$got, not $$want"; status=1; fi; \
 	done; exit $$status
 
 valgrind: tests

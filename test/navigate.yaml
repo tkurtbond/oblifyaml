@@ -1,0 +1,57 @@
+# Test data for test_navigate.adb, a worked example of walking a
+# nested document tree and reading out typed values. Deliberately
+# covers every YAML core-schema scalar type (null, bool, int, float,
+# string) plus both collection kinds (sequence, mapping), nested to a
+# couple of levels so both generic tree-walking and direct/targeted
+# field access have something realistic to demonstrate on -- plus a
+# "company" field nested 4 levels deep (see below) for a worked
+# example of deep chained access, By_Path, and nested iteration.
+
+name: Sample Config
+version: 3
+pi: 3.14159
+enabled: true
+disabled: false
+homepage: ~
+description: null
+
+tags:
+  - alpha
+  - beta
+  - gamma
+
+server:
+  host: localhost
+  port: 8080
+  timeout: 30.5
+  ssl: true
+
+endpoints:
+  - name: health
+    path: /health
+    public: true
+  - name: admin
+    path: /admin
+    public: false
+
+# company.departments/department/teams/team is 4 levels of nesting
+# (sequence/mapping/sequence/mapping) below the "company" field itself
+# -- same convention as "endpoints" above (a bare sequence-of-mappings
+# is not separately counted as its own extra level) -- ending in each
+# team's own scalar fields.
+company:
+  name: Acme Corp
+  departments:
+    - name: Engineering
+      teams:
+        - name: Platform
+          size: 8
+          lead: Ada Lovelace
+        - name: Infra
+          size: 5
+          lead: Alan Turing
+    - name: Sales
+      teams:
+        - name: Enterprise
+          size: 6
+          lead: Margaret Hamilton

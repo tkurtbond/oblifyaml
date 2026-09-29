@@ -43,7 +43,7 @@ PROCEDURE Run;
     nul: ARRAY 4 OF CHAR;
 BEGIN
   buf := NewBuffer('{a: {b: hello}, nul: "x\0y"}', len);
-  doc := FyThin.DocumentBuildFromString(SYSTEM.ADR(buf[0]), len);
+  doc := FyThin.DocumentBuildFromString(SYSTEM.ADR(buf[0]), len, TRUE, 0);
   Check.Check(doc # 0, "parse from heap buffer");
   IF doc # 0 THEN
     root := FyThin.DocumentRoot(doc);

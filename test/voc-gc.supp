@@ -1,0 +1,55 @@
+# Valgrind suppressions for voc's conservative garbage collector.
+#
+# Heap.GC(TRUE) scans every word of the stack for things that look
+# like heap pointers (voc src/runtime/Heap.Mod: MarkStack, then
+# HeapSort/Sift and MarkCandidates over the candidates it found),
+# including words that were never written. Memcheck reports each such
+# read as an uninitialised-value error: TestLiveness, which forces GCs,
+# showed 663,006 of them from 18 contexts, all in these four functions
+# (confirmed live). That is how a conservative collector works, not a
+# bug in the binding.
+#
+# Only uninitialised-value errors whose TOP frame is one of these
+# stack-scan functions are suppressed; the same kinds of error anywhere
+# else, and every invalid read/write and leak, are still reported.
+
+{
+   voc-gc-markstack-cond
+   Memcheck:Cond
+   fun:Heap_MarkStack
+}
+{
+   voc-gc-markstack-value8
+   Memcheck:Value8
+   fun:Heap_MarkStack
+}
+{
+   voc-gc-heapsort-cond
+   Memcheck:Cond
+   fun:Heap_HeapSort
+}
+{
+   voc-gc-heapsort-value8
+   Memcheck:Value8
+   fun:Heap_HeapSort
+}
+{
+   voc-gc-sift-cond
+   Memcheck:Cond
+   fun:Heap_Sift
+}
+{
+   voc-gc-sift-value8
+   Memcheck:Value8
+   fun:Heap_Sift
+}
+{
+   voc-gc-markcandidates-cond
+   Memcheck:Cond
+   fun:Heap_MarkCandidates
+}
+{
+   voc-gc-markcandidates-value8
+   Memcheck:Value8
+   fun:Heap_MarkCandidates
+}

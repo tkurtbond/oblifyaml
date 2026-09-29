@@ -81,8 +81,9 @@ The thick layer (`Fyaml`, `FyamlStreams`) uses plain `INTEGER`/`LONGINT`.
 
 ## Test
 
-Each test is its own main module in `test/` (`TestThin.Mod` so far),
-printing `ok   - <label>` / `FAIL - <label>` per check through the
+Each test is its own main module in `test/` (`TestThin`,
+`TestParseErrors`, `TestQuickstart`, `TestNavigate`, `TestPath`,
+`TestLiveness`), printing `ok   - <label>` / `FAIL - <label>` per check through the
 shared `test/Check.Mod`, and ending with `All checks passed.` or
 `<N> check(s) failed.` A failing run exits 1, so `make test` fails. To
 judge a run, grep for `FAIL` or read the last line. **Adding a test
@@ -97,19 +98,55 @@ of GC finalizers. A passing run returns normally from the main module
 body so the finalizers run and valgrind's leak report stays meaningful.
 Keep it that way, and never end a test with `Platform.Exit(0)`.
 
+**Halt tests.** A programmer error must halt with the right `Fyaml.Assert*`
+code, and a program can't catch its own halt. So each such case is a
+separate small main module, `test/Halt*.Mod` (`HaltClosed`,
+`HaltKind`, `HaltIndex`), listed in the Makefile's `HALTTESTS` as
+`name:status`. `make test` fails unless each one exits with exactly
+that status. voc prints `Assertion failure. ASSERT code N.` and exits
+with `N`, and a method call on a NIL pointer prints `NIL access.` and
+exits with 246 (both confirmed live). voc refuses to compile an
+`ASSERT` it can prove false (`err 99 ASSERT fault`), so a probe needs
+a condition that is false only at run time.
+
+Expected stderr noise: libfyaml prints some failures itself,
+bypassing the collected diagnostics. `ParseFile` checks for an
+unopenable file first, so that case is quiet, but a directory given as
+a file still prints `[ERR]: fy_parse_load_document() failed`. That
+isn't a test failure.
+
 ### Valgrind: necessary, but NOT sufficient here
 
 Run anything that touches ownership or lifetime under
 
 ```sh
-valgrind --leak-check=full --show-leak-kinds=definite,indirect --error-exitcode=99 ./build/TestWhatever
+make valgrind
+# or, for one test, from test/:
+valgrind --leak-check=full --show-leak-kinds=definite,indirect --error-exitcode=99 --suppressions=voc-gc.supp ../build/TestWhatever
 ```
 
-(or `make valgrind`) before calling it done, the same rule as
-alibfyaml. **Expected and harmless:** one block of about 256 KB
-"still reachable", allocated by voc's own `Heap_InitHeap` (its GC heap
-chunk, never freed at exit). The `--show-leak-kinds` above already
-leaves it out. **But valgrind
+before calling it done, the same rule as alibfyaml. Two voc-specific
+things to know when reading the output:
+
+- **`test/voc-gc.supp` is required** for any program where a GC runs.
+  voc's collector scans the stack conservatively, reading words that
+  were never written. Without the suppressions, `TestLiveness` shows
+  663,006 "uninitialised value" errors, all inside `Heap_MarkStack`,
+  `Heap_HeapSort`, `Heap_Sift` and `Heap_MarkCandidates`. The file
+  suppresses only that error kind, and only when the top frame is one
+  of those four functions.
+- **Check "still reachable", not just "definitely lost".** A libfyaml
+  document that is never freed is pointed to from inside voc's heap
+  chunk, which stays reachable, so valgrind may classify the leak as
+  "still reachable" rather than "definitely lost". The only expected
+  still-reachable memory is voc's own heap chunk: exactly
+  `256,024 bytes in 1 blocks` (`Heap_InitHeap`) in every test.
+  Anything more means a document or other C memory wasn't freed.
+  Check with `--show-leak-kinds=all`. As a control, disabling the
+  document finalizer grew it to 29 blocks and made `TestLiveness`
+  fail.
+
+**But valgrind
 cannot see one bug class that is specific to voc, and it has already
 happened once (confirmed live in the Phase 0 spike):**
 
@@ -127,8 +164,8 @@ which may keep pointing into it. See PLAN.md, "Buffer lifetime".
 
 - `src/FyThin.Mod`: low-level libfyaml calls. No ownership or error
   policy.
-- `src/Fyaml.Mod` (Phase 1+): `Document`, `Node`, error results, typed
-  scalar accessors.
+- `src/Fyaml.Mod`: `Document`, `Node`, `Error`, iterators (Phase 1);
+  typed scalar accessors come in Phase 3.
 - `src/FyamlStreams.Mod` (Phase 5): multi-document streams.
 - `Makefile`: build and test; see Build above.
 - `test/`: one main module per concern, plus `Check.Mod` and the YAML
@@ -141,6 +178,14 @@ which may keep pointing into it. See PLAN.md, "Buffer lifetime".
 
 ## voc / Oberon-2 facts this binding depends on (confirmed)
 
+- **Oberon-2 has no call chaining.** A function call's result isn't a
+  designator (report §8.1), so `d.Root().Value("k")` doesn't compile
+  (`err 113 incompatible assignment`). Assign each step to a variable,
+  or use `ByPath` to go several levels in one call.
+- **libfyaml's `*_iterate` ends by resetting the cursor to NULL, which
+  also means "start over".** A naive `Next` after the end silently
+  restarts from the first item (confirmed live). `ItemIter`/`PairIter`
+  keep a `done` flag for this reason.
 - **`*)` ends a comment anywhere inside it**, including in text like
   `fy_node_is_*)`. The first `FyThin` build failed on exactly that
   (`err 41 END missing`, pointing at the comment line). Write "and

@@ -119,8 +119,10 @@ TYPE
 ```
 
 - **`Node` is a small heap object**, not a record value. Oberon-2
-  function procedures can't return records, and `n.Value("k").Scalar()`-style
-  chaining needs a pointer. The cost is one small GC allocation per
+  function procedures can't return records, so returning a Node from
+  `Value`/`Item`/`ByPath` needs a pointer. (Call chaining such as
+  `n.Value("k").Scalar()` turned out not to be possible at all in
+  Oberon-2, since a call's result isn't a designator; see Phase 1.) The cost is one small GC allocation per
   navigation step; measure it with a benchmark in the Phase 6 hardening
   pass, the same way alibfyaml's `bench/` measured its liveness
   overhead.
@@ -179,8 +181,11 @@ practice:
   voc's GC doesn't move objects, the address stays valid, and the GC
   keeps `buf` alive for as long as `doc` is. `CheckFin` also marks
   `buf` before the document's finalizer runs, so the order of
-  destruction is safe. **Confirm this ordering live in Phase 1**,
-  with a test that drops the only reference and forces `Heap.GC`.
+  destruction is safe. Phase 1 confirmed that a Node alone keeps its
+  Document and buffer alive across forced GCs, and that an
+  unreachable Document is finalized (`TestLiveness`). The ordering
+  claim itself rests on reading `Heap.Mod`, since the finalizer
+  doesn't read the buffer.
 - Taking `text` as a `VAR` parameter instead would avoid voc's copy.
   But the caller's variable can still change or go out of scope while
   the document lives, so always copy. Copying costs one `memcpy` per
@@ -366,14 +371,57 @@ valgrind, with findings written into this file.
    - Valgrind always shows one ~256 KB "still reachable" block: voc's
      own GC heap chunk (`Heap_InitHeap`). It's harmless and already
      left out by the chosen `--show-leak-kinds`.
-1. **Read-only parse and navigate.** `ParseString`/`ParseFile` (copy
-   the input buffer from day one), `Close` plus the finalizer, `Root`,
-   kind predicates (via the inline `fy_node_is_*`), `Scalar`/`ScalarLen`/
-   `ScalarInto`, `Length`/`Item`, `Value`/`HasKey`, the iterators,
-   `ByPath`/`Path`, and the `parseError` diagnostics. Port
-   `TestQuickstart` (read side), `TestNavigate`, `TestPath`,
-   `TestParseErrors`, and `TestLiveness` (including the forced-GC
-   finalizer-ordering check described under "Buffer lifetime").
+1. **`[done]` Read-only parse and navigate.** `src/Fyaml.Mod`:
+   `ParseString`/`ParseFile` (input copied from day one), `Close`
+   (idempotent) plus the GC finalizer, `IsOpen`, `Root`, `Valid`,
+   `Kind`/`IsScalar`/`IsSequence`/`IsMapping` (via the inline
+   `fy_node_is_*`), `Scalar`/`ScalarLen`/`ScalarInto`/`ScalarIs`,
+   `Length`/`Item` (0-based), `Value`/`HasKey`, `ItemIter`/`PairIter`,
+   `ByPath`/`Path`, and `Error` (kinds `ParseError`, `FileError`) in
+   gcc diagnostic format. Also `openDocuments-`, a count of open
+   documents, which the finalizer test reads. `FyThin` grew to the
+   diag, sequence, mapping and path calls, plus `fopen`/`strerror`/
+   `strlen`/`free`. Tests:
+   - `TestParseErrors` (15 checks), `TestQuickstart` (read side, 6),
+     `TestNavigate` (25), `TestPath` (9) and `TestLiveness` (12),
+     ported from alibfyaml on its own `config.yaml`, `navigate.yaml`
+     and `malformed.yaml`.
+   - Halt tests `HaltClosed`/`HaltKind`/`HaltIndex`, which must exit
+     with 61/62/63.
+   - All pass, and all are clean under valgrind: 0 errors, nothing
+     lost, and only voc's own heap chunk still reachable.
+     `TestLiveness` passed 50 of 50 repeated runs, which matters
+     because its finalizer check depends on a conservative stack scan.
+
+   Anchor resolution is **always on** here (`FYPCF_RESOLVE_DOCUMENT`),
+   so aliases never read back as their raw reference text. Phase 4
+   adds the option to turn it off.
+
+   Found while doing it, all confirmed live and now in AGENTS.md:
+   - **No call chaining in Oberon-2**: `d.Root().Value("k")` doesn't
+     compile, because a call's result isn't a designator. Code uses a
+     variable per step, or `ByPath` for several levels at once.
+   - **libfyaml's `*_iterate` restarts after the end**: it signals the
+     end by setting the cursor to NULL, which also means "start". A
+     `done` flag in each iterator fixes this.
+   - **libfyaml doesn't collect "can't open file"**: it prints
+     `[ERR]: failed to open ...` on stderr, and the diag collects
+     nothing. `ParseFile` now `fopen`s first and returns a
+     `FileError` with the OS reason
+     (`no-such-file.yaml: error: No such file or directory`). A
+     directory still gets libfyaml's stderr line and a generic
+     `ParseError` naming the path.
+   - **Valgrind reports uninitialised values from voc's GC**: once a GC
+     runs, its conservative stack scan produces many (663,006 in
+     `TestLiveness`), all in four `Heap_*` functions.
+     `test/voc-gc.supp` suppresses exactly those.
+   - **A leak can hide as "still reachable"**: an unfreed document is
+     reachable through voc's heap chunk, so check the still-reachable
+     total, which should be only voc's 256,024-byte heap chunk. As a
+     control, disabling the finalizer made that grow and made the
+     finalizer check fail.
+   - voc exit statuses: `ASSERT` failure = its code; NIL method call =
+     246. voc rejects an `ASSERT` it can prove false at compile time.
 2. **Emit and build/mutate.** `ToYAML(flags)` and `ToFile`, with the
    emitter flag constants taken from the header through code
    procedures rather than retyped. `NewDocument`,
@@ -427,9 +475,9 @@ valgrind, with findings written into this file.
   (LONGINT), and every `size_t` needs HUGEINT or SYSTEM.ADDRESS.
   Consequence: code using the binding must be compiled with `-OC`
   too, because models can't be mixed; say so in the README.
-- **`Node` as heap object versus record.** The proposal is a heap
-  object, for chaining and type-bound procedures. Revisit only if
-  Phase 6 benchmarks show allocation dominating.
+- **`Node` as heap object versus record.** It is a heap object, because
+  functions can't return records. Revisit only if Phase 6 benchmarks
+  show allocation dominating.
 - **Timestamps.** alibfyaml's plan covers them (YAML 1.1 grammar), but
   voc has no standard date/time type to return. `ethDates` exists in
   voc's library. Defer until there's a consumer.
