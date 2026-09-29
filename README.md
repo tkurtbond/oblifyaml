@@ -7,7 +7,8 @@ It is a port of the Ada binding
 alibfyaml, adapted to a garbage-collected
 language without exceptions.
 
-It covers parsing (strings, files, multi-document streams), navigation,
+It covers parsing (strings, files, standard input, multi-document
+streams), navigation,
 typed values with YAML 1.2 core-schema resolution, building and changing
 documents, emitting YAML or JSON, anchors and aliases, tags, styles, and
 source locations. Errors in the input come back as values with
@@ -142,6 +143,12 @@ without it. But voc's collector runs only when Oberon code allocates, and
 can't see libfyaml's C memory, so close documents parsed in a loop.
 `ParseString` copies its text; parsing reads only the first document of
 a multi-document input (use `FyamlStreams` for all of them).
+
+**Standard input.** `ParseStdin(err)` (or `ParseStdinWith(options,
+err)`) parses standard input, and `FyamlStreams.OpenStdin(err)` reads
+all its documents; errors name the file `<stdin>`. `ParseStdin` reads
+stdin to its end, so call it once. libfyaml reads stdin through C's
+stdio, so don't also read it with voc's `In` module.
 
 **Nodes.** `Root`, `Value`, `Item`, `ByPath` and the iterators return
 `Node`s: small heap objects that keep their document alive. A `Node`

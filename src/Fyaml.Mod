@@ -76,6 +76,7 @@ CONST
   AssertAttach* = 64;  (* node already attached, or from another document *)
 
   stringName* = "(string-in-memory)";  (* file name reported for string input *)
+  stdinName* = "<stdin>";               (* file name reported for standard input, as gcc does *)
 
 TYPE
   String* = POINTER TO ARRAY OF CHAR;
@@ -291,8 +292,8 @@ BEGIN
   RETURN d
 END NewDoc;
 
-(* Parses from the string (buffer # NIL, len bytes) or from the file
-   named by path. name labels errors when libfyaml gives no file name.
+(* Parses from the string (buffer # NIL, len bytes), from the file
+   named by path (path # NIL), or else from standard input. name labels errors when libfyaml gives no file name.
    The diag is created and destroyed here, exactly once on every path
    (alibfyaml's Parse_Common double-free). *)
 PROCEDURE Build(buffer: String; len: SYSTEM.ADDRESS; path: String;
@@ -305,8 +306,10 @@ BEGIN
   FyThin.DiagSetCollectErrors(diag, TRUE);
   IF buffer # NIL THEN
     h := FyThin.DocumentBuildFromString(SYSTEM.ADR(buffer[0]), len, ~(NoResolve IN options), diag)
-  ELSE
+  ELSIF path # NIL THEN
     h := FyThin.DocumentBuildFromFile(SYSTEM.ADR(path[0]), ~(NoResolve IN options), diag)
+  ELSE
+    h := FyThin.DocumentBuildFromStdin(~(NoResolve IN options), diag)
   END;
   IF h = 0 THEN err := Collected(ParseError, diag, fileOverride, name, "document failed to parse") END;
   FyThin.DiagDestroy(diag);
@@ -389,6 +392,21 @@ END ParseFileWith;
 PROCEDURE ParseFile*(path: ARRAY OF CHAR; VAR err: Error): Document;
 BEGIN RETURN ParseFileWith(path, {}, err)
 END ParseFile;
+
+(* Parses standard input as one YAML document, like ParseStringWith;
+   errors name the file stdinName. It reads stdin to its end, so a
+   second call finds nothing and returns a ParseError, and only the
+   first of several "---" documents is kept (use
+   FyamlStreams.OpenStdin for all of them). It reads through C's
+   stdio, so don't also read stdin with voc's In module. *)
+PROCEDURE ParseStdinWith*(options: SET; VAR err: Error): Document;
+BEGIN RETURN Build(NIL, 0, NIL, stdinName, FromChars(stdinName), options, err)
+END ParseStdinWith;
+
+(* ParseStdinWith({}, err): anchors resolved. *)
+PROCEDURE ParseStdin*(VAR err: Error): Document;
+BEGIN RETURN ParseStdinWith({}, err)
+END ParseStdin;
 
 (* Frees the document's tree now. Idempotent. Every Node from it
    becomes dead (see Valid). *)

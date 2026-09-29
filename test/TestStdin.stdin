@@ -1,0 +1,9 @@
+base: &b
+  name: widget
+  size: 3
+item:
+  <<: *b
+  size: 4
+text: "a scalar long enough to be well past the sixty-four byte text buffer"
+---
+name: second document, ignored

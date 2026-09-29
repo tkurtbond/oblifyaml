@@ -36,7 +36,7 @@ TYPE
     diag: FyThin.Diag;          (* the parser's: tells an error from the end *)
     buffer: Fyaml.String;       (* OpenString text: the parser and documents span into it *)
     path: Fyaml.String;         (* OpenFile path: libfyaml opens the file lazily *)
-    name: Fyaml.String;         (* labels documents' errors *)
+    name: Fyaml.String;         (* labels documents' errors; OpenStdin's parser keeps it *)
     pending: FyThin.Document;   (* read ahead by HasNext, not yet taken *)
     peeked: BOOLEAN;            (* pending is valid (0 = the end or an error) *)
     finished: BOOLEAN           (* the end, or an error, was reached *)
@@ -129,6 +129,26 @@ END OpenFileWith;
 PROCEDURE OpenFile*(path: ARRAY OF CHAR; VAR err: Fyaml.Error): Stream;
 BEGIN RETURN OpenFileWith(path, {}, err)
 END OpenFile;
+
+(* A stream over standard input, with options as for
+   Fyaml.ParseStringWith; errors name the file Fyaml.stdinName. Input
+   is read as documents are taken, so documents before a malformed one
+   are still returned. Read standard input through one stream only,
+   and not also with voc's In module: libfyaml reads it through C's
+   stdio, in blocks. err is always NIL. *)
+PROCEDURE OpenStdinWith*(options: SET; VAR err: Fyaml.Error): Stream;
+  VAR s: Stream;
+BEGIN
+  err := NIL;
+  s := New(options);
+  s.name := Copy(Fyaml.stdinName);
+  ASSERT(FyThin.ParserSetInputStdin(s.parser, SYSTEM.ADR(s.name[0])) = 0);
+  RETURN s
+END OpenStdinWith;
+
+PROCEDURE OpenStdin*(VAR err: Fyaml.Error): Stream;
+BEGIN RETURN OpenStdinWith({}, err)
+END OpenStdin;
 
 (* Loads the next document into s.pending (0 at the end or on an
    error, with err set for an error). Nothing is loaded once finished:

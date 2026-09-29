@@ -85,7 +85,8 @@ The thick layer (`Fyaml`, `FyamlStreams`) uses plain `INTEGER`/`LONGINT`.
 Each test is its own main module in `test/` (`TestThin`,
 `TestParseErrors`, `TestQuickstart`, `TestNavigate`, `TestPath`,
 `TestLiveness`, `TestBuild`, `TestMutate`, `TestScalars`,
-`TestAnchors`, `TestLocation`, `TestStreams`), printing `ok   - <label>` / `FAIL - <label>` per check through the
+`TestAnchors`, `TestLocation`, `TestStreams`, `TestStdin`,
+`TestStdinError`, `TestStdinStream`), printing `ok   - <label>` / `FAIL - <label>` per check through the
 shared `test/Check.Mod`, and ending with `All checks passed.` or
 `<N> check(s) failed.` A failing run exits 1, so `make test` fails. To
 judge a run, grep for `FAIL` or read the last line. **Adding a test
@@ -93,6 +94,13 @@ means adding its name to `TESTS` in the Makefile.** YAML fixtures go
 in `test/` (tests run with `test/` as their working directory), copied
 from `~/Repos/Ada/alibfyaml/test/*.yaml` where one fits, so all three
 bindings are tested against the same inputs.
+
+**Stdin tests.** `make test` and `make valgrind` run each test with
+stdin redirected from `test/<name>.stdin` if that file exists, else
+from `/dev/null`. A process can read stdin only once, so each stdin
+case (`TestStdin`, `TestStdinError`, `TestStdinStream`) is its own
+program with its own `.stdin` file. To run one by hand, from `test/`:
+`../build/TestStdin < TestStdin.stdin`.
 
 `Check.Summary` calls `Platform.Exit(1)` **only** on failure. That
 calls C `exit()` directly and skips `Heap.FINALL`, the exit-time run
@@ -126,10 +134,14 @@ Run anything that touches ownership or lifetime under
 ```sh
 make valgrind
 # or, for one test, from test/:
-valgrind --leak-check=full --show-leak-kinds=definite,indirect --error-exitcode=99 --suppressions=voc-gc.supp ../build/TestWhatever
+valgrind --leak-check=full --show-leak-kinds=definite,indirect --error-exitcode=99 --suppressions=voc-gc.supp --suppressions=libfyaml.supp ../build/TestWhatever
 ```
 
-before calling it done, the same rule as alibfyaml. Two voc-specific
+before calling it done, the same rule as alibfyaml. `libfyaml.supp`
+covers one known bug in the installed libfyaml: `realloc(buf, 0)` on
+empty stream input, which Memcheck reports as `ReallocZero` and which
+doesn't leak (PLAN.md, "Standard input"). Keep its entries narrow, and
+add one only after confirming the bug is in libfyaml. Two voc-specific
 things to know when reading the output:
 
 - **`test/voc-gc.supp` is required** for any program where a GC runs.

@@ -1,0 +1,16 @@
+# Valgrind suppressions for known issues inside the installed libfyaml
+# (libfyaml-devel-0.8-9.fc44), not in the binding.
+
+# Empty stream input (e.g. ParseStdin with stdin at its end):
+# fy_reader_input_done "chops" the read buffer to its used size with
+# realloc(buffer, 0). glibc frees the buffer and returns NULL, so
+# nothing leaks (TestStdin: 0 lost, still-reachable only voc's heap
+# chunk), but Memcheck reports ReallocZero. The libfyaml source tree
+# (v1.0.0-beta1) already frees an empty buffer instead. Only this error
+# kind, only from that function.
+{
+   libfyaml-input-done-realloc-zero
+   Memcheck:ReallocZero
+   fun:realloc
+   fun:fy_reader_input_done
+}

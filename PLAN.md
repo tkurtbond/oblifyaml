@@ -712,6 +712,57 @@ valgrind, with findings written into this file.
      to C: `Report(Fyaml.ParseFile(p, err), err)` may read `err`
      before the call sets it. Caught while writing an example.
 
+### Standard input `[done]`
+
+Added after Phase 6, on request: `Fyaml.ParseStdin`/`ParseStdinWith`
+(one document, through `fy_document_build_from_fp(cfg, stdin)`) and
+`FyamlStreams.OpenStdin`/`OpenStdinWith` (every document, through
+`fy_parser_set_input_fp(fyp, name, stdin)`). Errors name the file
+`<stdin>`, as gcc does (the constant `Fyaml.stdinName`). Tests: stdin
+can be read only once per process, so there are three programs,
+`TestStdin` (7 checks), `TestStdinError` (4) and `TestStdinStream`
+(9), each fed `test/<name>.stdin`; `make test` and `make valgrind`
+redirect stdin from that file when there is one, and from `/dev/null`
+otherwise. All pass and are clean under valgrind. Controls: running
+them on `/dev/null` (a Makefile slip on the way) failed all three, and
+passing no `<stdin>` override in `ParseStdinWith` failed two
+`TestStdinError` checks (the file read `<stream>`).
+
+Confirmed live (a C probe under valgrind, then the tests):
+
+- **No buffer to keep.** For a stream input libfyaml reads into its
+  own buffers, freed with the document or parser, so neither form
+  keeps an Oberon copy. `TestStdin` reads a long scalar and a merged
+  mapping back after a forced GC, and `TestStdinStream` reads its
+  documents after the stream is closed and collected.
+- **The name passed to `fy_parser_set_input_fp` is not copied**
+  (`fyic.stream.name = name`), so the stream keeps it in `s.name`,
+  which is also what labels its documents' errors. Documents loaded
+  from the parser don't need it once the parser is gone.
+- **`fy_document_build_from_fp` labels errors `<stream>`** (it passes
+  no name), so `ParseStdin` overrides the label with `<stdin>`, the
+  way string input's `<memory-@...>` becomes `(string-in-memory)`.
+- **`ParseStdin` reads stdin to its end**, even past the first
+  document (libfyaml reads in blocks), so a second `ParseStdin` finds
+  nothing: `<stdin>: error: document failed to parse`, with
+  `[ERR]: fy_parse_load_document() failed` on stderr and nothing
+  collected. That's the same result as empty input.
+- **Empty stream input trips a libfyaml bug that valgrind reports.**
+  In the installed library, `fy_reader_input_done` shrinks the read
+  buffer with `realloc(buffer, 0)`, which Memcheck reports as
+  `ReallocZero`. glibc frees the buffer, so nothing leaks. The
+  libfyaml source tree already frees an empty buffer instead. The new
+  `test/libfyaml.supp` suppresses exactly that error kind from that
+  function, and `make valgrind` passes it alongside `voc-gc.supp`.
+- **A stream reads as documents are taken**, so documents before a
+  malformed one come back, and the error names `<stdin>` with a line
+  and column.
+- libfyaml reads through C's stdio, in blocks, while voc's `In` module
+  reads `Platform.StdIn` itself with `Platform.ReadBuf`, keeping one
+  character read ahead (from `src/runtime/In.Mod`). Each would take
+  input the other expects, so the two must not share stdin
+  (documented, not tested).
+
 ## Open questions
 
 - ~~**Module names.**~~ Decided: `FyThin`/`Fyaml`/`FyamlStreams`.
@@ -742,11 +793,10 @@ valgrind, with findings written into this file.
   the binding by not making Nodes (or strings) that never reach the
   caller.
 - ~~**Reading from an open `Files.File` or stdin**~~ (alibfyaml's
-  `Text_IO`). Decided in Phase 6: not added. voc's `Files.File` gives
-  no C `FILE*` or descriptor to hand to libfyaml, and reading its
+  `Text_IO`). Decided: `Files.File` is not added. voc's `Files.File`
+  gives no C `FILE*` or descriptor to hand to libfyaml, and reading its
   contents into a string for `ParseString` is a few lines for the
-  caller. stdin could be added cheaply
-  (`fy_document_build_from_fp(cfg, stdin)`) when a program needs it.
+  caller. stdin was added after Phase 6 (see "Standard input" below).
 - **Timestamps.** Still deferred (Phase 6): alibfyaml's plan covers
   them (YAML 1.1 grammar), but voc has no standard date/time type to
   return. `ethDates` exists in voc's library. Add them when a program

@@ -1,0 +1,11 @@
+name: one
+---
+name: two
+---
+name: &n three
+alias: *n
+---
+name: four
+  bad: indent
+---
+name: five

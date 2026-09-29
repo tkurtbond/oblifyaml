@@ -11,7 +11,7 @@
 
 VOC      ?= /usr/local/sw/versions/voc/git/bin/voc
 VOCFLAGS := -OC            # size model: decided in PLAN.md; never mix models
-VALGRIND ?= valgrind --leak-check=full --show-leak-kinds=definite,indirect --error-exitcode=99 --suppressions=voc-gc.supp
+VALGRIND ?= valgrind --leak-check=full --show-leak-kinds=definite,indirect --error-exitcode=99 --suppressions=voc-gc.supp --suppressions=libfyaml.supp
 
 # voc reads LDLIBS from the environment itself when linking a main module.
 export LDLIBS := $(shell pkg-config --libs libfyaml)
@@ -23,7 +23,7 @@ LIBMODS := FyThin Fyaml FyamlStreams
 # Test support modules, in import order.
 TESTSUPPORT := Check
 # Test programs (test/<name>.Mod, each a main module).
-TESTS := TestThin TestParseErrors TestQuickstart TestNavigate TestPath TestLiveness TestBuild TestMutate TestScalars TestAnchors TestLocation TestStreams
+TESTS := TestThin TestParseErrors TestQuickstart TestNavigate TestPath TestLiveness TestBuild TestMutate TestScalars TestAnchors TestLocation TestStreams TestStdin TestStdinError TestStdinStream
 # Programs that must halt (test/<name>.Mod), as name:required-exit-status;
 # the status is one of Fyaml's Assert* codes.
 HALTTESTS := HaltClosed:61 HaltKind:62 HaltIndex:63 HaltStale:61 HaltAttach:64 HaltAttached:64 HaltTyped:62 HaltResolved:61 HaltStream:61
@@ -107,12 +107,16 @@ bench: $(BENCHBINS) $(WIDE) $(MANYDOCS)
 	@printf 'BenchStreams       '; bench/run_stats.sh $(RUNS) $(BUILD)/BenchStreams $(MANYDOCS)
 	@printf 'BenchStreams gc    '; bench/run_stats.sh $(RUNS) $(BUILD)/BenchStreams $(MANYDOCS) gc
 
+# Shell function, called from within test/: a test's stdin --
+# <name>.stdin if there is one (TestStdin and friends), else /dev/null.
+STDIN := stdin() { if [ -f $$1.stdin ]; then echo $$1.stdin; else echo /dev/null; fi; }
+
 # Run every test from test/ (fixtures are relative to it); report all,
 # fail at the end if any failed. Each halt test must exit with exactly
 # its listed status.
 test: tests
-	@status=0; for t in $(TESTS); do \
-	  echo "== $$t"; (cd test && ../$(BUILD)/$$t) || status=1; \
+	@$(STDIN); status=0; for t in $(TESTS); do \
+	  echo "== $$t"; (cd test && ../$(BUILD)/$$t < $$(stdin $$t)) || status=1; \
 	done; \
 	for h in $(HALTTESTS); do \
 	  t=$${h%%:*}; want=$${h##*:}; echo "== $$t (must halt with $$want)"; \
@@ -134,9 +138,9 @@ test: tests
 # extra still-reachable blocks.
 REACHABLE := still reachable: 256,024 bytes in 1 blocks
 valgrind: tests
-	@status=0; for t in $(TESTS); do \
+	@$(STDIN); status=0; for t in $(TESTS); do \
 	  echo "== valgrind $$t"; \
-	  (cd test && $(VALGRIND) --log-file=../$(BUILD)/$$t.vg ../$(BUILD)/$$t) || status=1; \
+	  (cd test && $(VALGRIND) --log-file=../$(BUILD)/$$t.vg ../$(BUILD)/$$t < $$(stdin $$t)) || status=1; \
 	  grep -E 'ERROR SUMMARY|lost:|reachable:' $(BUILD)/$$t.vg; \
 	  grep -q '$(REACHABLE)' $(BUILD)/$$t.vg || { echo "FAIL - $$t: expected '$(REACHABLE)'"; status=1; }; \
 	done; exit $$status

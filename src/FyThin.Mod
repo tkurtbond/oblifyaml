@@ -52,6 +52,8 @@ PROCEDURE -documentBuildFromString(str, len: SYSTEM.ADDRESS; resolve: BOOLEAN; d
   "(ADDRESS)fy_document_build_from_string(&(struct fy_parse_cfg){ .flags = (resolve) ? FYPCF_RESOLVE_DOCUMENT : 0, .diag = (struct fy_diag*)diag }, (const char*)str, (size_t)len)";
 PROCEDURE -documentBuildFromFile(file: SYSTEM.ADDRESS; resolve: BOOLEAN; diag: Diag): Document
   "(ADDRESS)fy_document_build_from_file(&(struct fy_parse_cfg){ .flags = (resolve) ? FYPCF_RESOLVE_DOCUMENT : 0, .diag = (struct fy_diag*)diag }, (const char*)file)";
+PROCEDURE -documentBuildFromStdin(resolve: BOOLEAN; diag: Diag): Document
+  "(ADDRESS)fy_document_build_from_fp(&(struct fy_parse_cfg){ .flags = (resolve) ? FYPCF_RESOLVE_DOCUMENT : 0, .diag = (struct fy_diag*)diag }, stdin)";
 PROCEDURE -documentDestroy(fyd: Document)
   "fy_document_destroy((struct fy_document*)fyd)";
 PROCEDURE -documentRoot(fyd: Document): Node
@@ -74,6 +76,15 @@ PROCEDURE DocumentBuildFromFile*(file: SYSTEM.ADDRESS; resolve: BOOLEAN; diag: D
 BEGIN RETURN documentBuildFromFile(file, resolve, diag)
 END DocumentBuildFromFile;
 
+(* Reads C's stdin to its end (all of it, even past the first
+   document: libfyaml reads a stream input in blocks, confirmed live)
+   and builds its first document. libfyaml copies what it reads, so
+   nothing needs to outlive the call; errors are labelled "<stream>".
+   Returns 0 on failure. *)
+PROCEDURE DocumentBuildFromStdin*(resolve: BOOLEAN; diag: Diag): Document;
+BEGIN RETURN documentBuildFromStdin(resolve, diag)
+END DocumentBuildFromStdin;
+
 PROCEDURE DocumentDestroy*(fyd: Document);
 BEGIN documentDestroy(fyd)
 END DocumentDestroy;
@@ -88,6 +99,8 @@ PROCEDURE -parserSetString(fyp: Parser; str, len: SYSTEM.ADDRESS): SYSTEM.INT32
   "(INT32)fy_parser_set_string((struct fy_parser*)fyp, (const char*)str, (size_t)len)";
 PROCEDURE -parserSetInputFile(fyp: Parser; file: SYSTEM.ADDRESS): SYSTEM.INT32
   "(INT32)fy_parser_set_input_file((struct fy_parser*)fyp, (const char*)file)";
+PROCEDURE -parserSetInputStdin(fyp: Parser; name: SYSTEM.ADDRESS): SYSTEM.INT32
+  "(INT32)fy_parser_set_input_fp((struct fy_parser*)fyp, (const char*)name, stdin)";
 PROCEDURE -parseLoadDocument(fyp: Parser): Document
   "(ADDRESS)fy_parse_load_document((struct fy_parser*)fyp)";
 PROCEDURE -parserDestroy(fyp: Parser) "fy_parser_destroy((struct fy_parser*)fyp)";
@@ -112,6 +125,15 @@ END ParserSetString;
 PROCEDURE ParserSetInputFile*(fyp: Parser; file: SYSTEM.ADDRESS): SYSTEM.INT32;
 BEGIN RETURN parserSetInputFile(fyp, file)
 END ParserSetInputFile;
+
+(* Reads C's stdin. name: a 0X-terminated label for errors, which
+   libfyaml keeps without copying (fy_parser_set_input_fp), so it
+   must stay valid while the parser is in use. What libfyaml reads is
+   copied into its own buffers; documents loaded from it don't need
+   name (confirmed live under valgrind). 0 on success. *)
+PROCEDURE ParserSetInputStdin*(fyp: Parser; name: SYSTEM.ADDRESS): SYSTEM.INT32;
+BEGIN RETURN parserSetInputStdin(fyp, name)
+END ParserSetInputStdin;
 
 (* The next document, or 0 at the end or on an error: DiagGotError
    tells them apart. After an error every later call returns 0 too;
