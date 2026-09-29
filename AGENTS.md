@@ -1,0 +1,191 @@
+# AGENTS.md
+
+Oberon-2 binding to libfyaml's core parser/emitter/document API,
+compiled with Vishap Oberon (`voc`). See PLAN.md for the design,
+phased roadmap, and open questions; this file is operational notes
+for an agent working in this repo, not a design doc.
+
+This binding is a port of the Ada binding in `~/Repos/Ada/alibfyaml`
+(and borrows from the Chicken Scheme binding in
+`~/Repos/Scheme/Chicken/5/slibfyaml`, which, like voc, runs on a
+garbage-collected host). Read their `AGENTS.md`/`PLAN.md` before
+redesigning anything: most of their text is hard-won, confirmed
+behavior of libfyaml itself, and applies here unchanged.
+
+## Reference material
+
+| What | Where |
+|---|---|
+| libfyaml source (v1.0.0-beta1) | `/usr/local/sw/src/lang/C/libfyaml/` (`include/libfyaml.h`, `src/lib/`) |
+| Installed libfyaml | system package `libfyaml-devel-0.8-9.fc44`; `/usr/include/libfyaml.h`, `pkg-config --libs libfyaml` = `-lfyaml` |
+| voc compiler | `/usr/local/sw/versions/voc/git/bin/voc` (v2.1.0, LP64); this binding uses the `-OC` model: runtime `lib/libvoc-OC.{a,so}`, headers/symbols under `C/` (`-O2`'s are `libvoc-O2`/`2/`) |
+| voc source | `/usr/local/sw/src/lang/Oberon/vishap/compiler/` (runtime in `src/runtime/`, docs in `doc/`, C-library binding examples in `src/test/newt`, `src/test/gtk`) |
+| Oberon-2 report | `~/Reference/Computer/Languages/Oberon/Oberon2.pdf`; plain text: `Oberon2-layout.text` (keeps tables/columns readable) and `Oberon2-no-layout.text` |
+| Ada binding | `~/Repos/Ada/alibfyaml/` |
+| Scheme binding | `~/Repos/Scheme/Chicken/5/slibfyaml/` |
+
+As with alibfyaml: the system package's `0.8` version label is
+misleading. It already exposes the 1.0-beta1 API. Confirm a symbol
+before assuming it's missing, e.g.
+`nm -D $(pkg-config --variable=libdir libfyaml)/libfyaml.so | grep fy_document_build_from_string`.
+
+## Build
+
+`voc` is not on the default `PATH`:
+
+```sh
+export PATH=/usr/local/sw/versions/voc/git/bin:$PATH
+```
+
+voc translates each module to C (`Mod.c`, `Mod.h`, `Mod.sym`) **in the
+current directory**, then calls gcc. Modules must be compiled in
+import order, and the main module last with `-m`. Extra C flags come
+from environment variables that voc reads itself (`src/compiler/extTools.Mod`):
+`CFLAGS` (every compile), and `LDFLAGS`/`LDLIBS` (main-module link
+only). Link libfyaml with:
+
+```sh
+LDLIBS="$(pkg-config --libs libfyaml)" voc -OC -s FyThin.Mod ... Test.Mod -m
+```
+
+`-s` lets voc create or change a module's `.sym` file. Without it, a
+changed interface is a compile error. The planned `Makefile` (PLAN.md
+Phase 0) wraps all of this and keeps generated files in `build/`. Use
+it rather than invoking voc by hand once it exists. Add `-V` to see
+the exact gcc command voc runs.
+
+Integer size model: **build every module with `-OC`**, as the first
+option on the voc command line so it applies to every file. This is
+decided; see PLAN.md, "Integer model". Under `-OC`, voc's types match
+LP64 C one-to-one: `SHORTINT` = `short` (16 bits), `INTEGER` = `int`
+(32), `LONGINT` = `long`/`size_t`/`ssize_t` (64), and `SET` = the
+32-bit `unsigned int` flag masks. `LEN()` returns a 64-bit `LONGINT`.
+Code using the binding must also be compiled with `-OC`: `.sym` files
+and the runtime library differ between models, so **never mix models**.
+A forgotten `-OC` shows up as a `.sym` mismatch or as silently wrong
+integer widths. In `FyThin`, still write the explicit-size types
+(`SYSTEM.INT32` for `int`, `SYSTEM.ADDRESS` for pointers and `size_t`)
+so every C-boundary signature says what it means whatever the model.
+The thick layer (`Fyaml`, `FyamlStreams`) uses plain `INTEGER`/`LONGINT`.
+
+## Test
+
+Planned (PLAN.md Phase 0): one standalone main module per concern in
+`test/` (`TestQuickstart.Mod`, `TestNavigate.Mod`, ...), each printing
+`ok   - <label>` / `FAIL - <label>` per check via a shared `Check`
+module and ending with `All checks passed.` or `<N> check(s) failed.`
+To judge a run, grep for `FAIL` or read the last line; the exit
+status alone isn't enough. YAML fixtures are copied from
+`~/Repos/Ada/alibfyaml/test/*.yaml` where one fits, so all three
+bindings are tested against the same inputs.
+
+### Valgrind: necessary, but NOT sufficient here
+
+Run anything that touches ownership or lifetime under
+
+```sh
+valgrind --leak-check=full --show-leak-kinds=definite,indirect --error-exitcode=99 ./build/TestWhatever
+```
+
+before calling it done, the same rule as alibfyaml. **But valgrind
+cannot see one bug class that is specific to voc, and it has already
+happened once (confirmed live in the Phase 0 spike):**
+
+voc passes a value `ARRAY OF CHAR` parameter by copying it into
+`alloca` memory (`__DUP` in `SYSTEM.h`), which is released when the
+procedure returns. A string handed to `fy_document_build_from_string`
+this way leaves the document holding zero-copy spans into a dead stack
+frame. `fy_node_get_scalar` then silently returns garbage or empty
+text. Valgrind reports **0 errors**, because this is stack memory, not
+heap. The only defence is design plus tests that check actual values:
+never pass memory to libfyaml that doesn't outlive the libfyaml object
+which may keep pointing into it. See PLAN.md, "Buffer lifetime".
+
+## Layout (planned, see PLAN.md)
+
+- `src/FyThin.Mod`: low-level libfyaml calls. No ownership or error
+  policy.
+- `src/Fyaml.Mod`: `Document`, `Node`, error results, typed scalar
+  accessors.
+- `src/FyamlStreams.Mod`: multi-document streams.
+- `test/`: one main module per concern, plus `Check.Mod` and the YAML
+  fixtures.
+- `build/`: voc/gcc output (gitignored).
+- `PLAN.md`: design, decisions, confirmed findings, and open
+  questions, organized by section. Append to the relevant section
+  rather than starting a new document. Mark a finished section
+  `[done]`, and strike through an open question once it's decided.
+
+## voc / Oberon-2 facts this binding depends on (confirmed)
+
+- **C is bound with "code procedures"**: `PROCEDURE -name(params): T
+  "C expression";`. voc emits these as C *macros*, not functions, and
+  a header is pulled in with `PROCEDURE -Aname '#include <libfyaml.h>';`
+  (voc's own `Platformunix.Mod` does exactly this).
+- **An exported code procedure expands in the importing module's C
+  file**, where `<libfyaml.h>` was never included, so gcc fails with
+  "implicit declaration of function fy_...". (Confirmed in the spike.)
+  So `FyThin`'s code procedures are **unexported**, and each is wrapped
+  in an ordinary exported procedure. Don't "simplify" this by
+  exporting the macros.
+- **Because code procedures are inline C, `static inline` header
+  helpers ARE callable** (`fy_node_is_mapping`, `fy_node_is_alias`,
+  ...), and so are C struct fields (`e->line`) and `#define`
+  constants (`FYNWF_DONT_FOLLOW`). This removes two of alibfyaml's
+  workarounds: it had to reimplement the inline predicates, and it
+  hand-mirrored `fy_parse_cfg`/`fy_diag_error` as Ada records, which
+  its PLAN.md flags as an ABI-drift risk. **Don't mirror C structs as
+  Oberon records.** Read their fields through code procedures, so gcc
+  computes the offsets against the installed header.
+- Casts in code-procedure text: Oberon-side handles are
+  `SYSTEM.ADDRESS` (the C type `ADDRESS`, a signed integer the width
+  of a pointer), so cast explicitly on the way into C
+  (`(struct fy_node*)n`) and back out (`(ADDRESS)fy_...(...)`).
+  `CHAR` is `unsigned char` and `BOOLEAN` is `signed char` in voc's C.
+- **voc's GC** (`src/runtime/Heap.Mod`) is non-moving mark-sweep.
+  It scans the stack conservatively and module globals precisely, and
+  **cannot see pointers stored only in C memory**. Anything libfyaml
+  points into must also be reachable from an Oberon pointer, e.g. a
+  field of the owning `Document`.
+- **Finalizers**: `Heap.RegisterFinalizer(obj, proc)`. Before
+  sweeping, `CheckFin` marks each unreachable finalizable object *and
+  everything it references*, so a `Document`'s buffer field is still
+  valid while that `Document`'s finalizer runs. `Heap.FINALL` runs
+  every pending finalizer at normal program exit (`__FINI`), so
+  valgrind's end-of-run leak report is meaningful. The GC only runs
+  on Oberon allocation and cannot see libfyaml's C-side memory
+  pressure, which is why explicit `Close` is the primary cleanup path
+  and finalizers are only a backstop.
+- **Oberon-2 has no exceptions**, no generics, no closures, and
+  function procedures can't return arrays or records. That shapes the
+  API: results come back as `BOOLEAN` plus `VAR` out parameters or
+  an error object, strings are `POINTER TO ARRAY OF CHAR`, and
+  iteration uses explicit iterator records. See PLAN.md.
+  `ASSERT`/`HALT` end the program, so reserve them for programmer
+  errors (a closed document, a NIL node), never for bad input data.
+
+## Conventions
+
+- **Comments explain *why*, and only claim what has been verified.**
+  Where a comment or a decision depends on how libfyaml or voc
+  actually behaves, test it: write a throwaway program in the
+  scratchpad, run it (under valgrind if lifetime is in question, and
+  check the actual *values* too, per the `__DUP` note above), then
+  write the result down as a confirmed fact. libfyaml's header
+  comments have been wrong or misleading several times (see
+  alibfyaml's PLAN.md: `fy_node_get_path` on the root, the
+  `fy_document_insert_at` unref, the `fy_parser_set_input_file`
+  filename lifetime).
+- **Bind only what the thick layer calls.** Before adding a new entry
+  point to `FyThin`, confirm it exists (in the header for inline
+  helpers, or with `nm -D` for exported symbols).
+- **Document what every mutating operation does to each
+  `Node`/`Document` argument, on success and on failure.** libfyaml
+  itself can consume or invalidate handles; `fy_document_insert_at`
+  always unrefs its node, whatever the outcome.
+- **Cleanup must be idempotent.** An explicit `Close` and the GC
+  finalizer can both run on the same object, so `Close` must set the
+  handle to 0 before or when it frees, and do nothing if it's already
+  0. That rules out double frees.
+- Record decisions and findings in PLAN.md as they happen, the same
+  way alibfyaml does.
