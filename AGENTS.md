@@ -83,7 +83,7 @@ The thick layer (`Fyaml`, `FyamlStreams`) uses plain `INTEGER`/`LONGINT`.
 
 Each test is its own main module in `test/` (`TestThin`,
 `TestParseErrors`, `TestQuickstart`, `TestNavigate`, `TestPath`,
-`TestLiveness`), printing `ok   - <label>` / `FAIL - <label>` per check through the
+`TestLiveness`, `TestBuild`, `TestMutate`), printing `ok   - <label>` / `FAIL - <label>` per check through the
 shared `test/Check.Mod`, and ending with `All checks passed.` or
 `<N> check(s) failed.` A failing run exits 1, so `make test` fails. To
 judge a run, grep for `FAIL` or read the last line. **Adding a test
@@ -101,7 +101,7 @@ Keep it that way, and never end a test with `Platform.Exit(0)`.
 **Halt tests.** A programmer error must halt with the right `Fyaml.Assert*`
 code, and a program can't catch its own halt. So each such case is a
 separate small main module, `test/Halt*.Mod` (`HaltClosed`,
-`HaltKind`, `HaltIndex`), listed in the Makefile's `HALTTESTS` as
+`HaltKind`, `HaltIndex`, `HaltStale`, `HaltAttach`, `HaltAttached`), listed in the Makefile's `HALTTESTS` as
 `name:status`. `make test` fails unless each one exits with exactly
 that status. voc prints `Assertion failure. ASSERT code N.` and exits
 with `N`, and a method call on a NIL pointer prints `NIL access.` and
@@ -142,9 +142,11 @@ things to know when reading the output:
   still-reachable memory is voc's own heap chunk: exactly
   `256,024 bytes in 1 blocks` (`Heap_InitHeap`) in every test.
   Anything more means a document or other C memory wasn't freed.
-  Check with `--show-leak-kinds=all`. As a control, disabling the
-  document finalizer grew it to 29 blocks and made `TestLiveness`
-  fail.
+  `make valgrind` enforces this (it greps each test's log for that
+  exact line); for a single run use `--show-leak-kinds=all`. As
+  controls, disabling the document finalizer grew it to 29 blocks and
+  made `TestLiveness` fail, and disabling the orphan-node free at
+  `Close` grew `TestBuild`'s to 14 blocks with nothing "lost".
 
 **But valgrind
 cannot see one bug class that is specific to voc, and it has already
@@ -165,7 +167,8 @@ which may keep pointing into it. See PLAN.md, "Buffer lifetime".
 - `src/FyThin.Mod`: low-level libfyaml calls. No ownership or error
   policy.
 - `src/Fyaml.Mod`: `Document`, `Node`, `Error`, iterators (Phase 1);
-  typed scalar accessors come in Phase 3.
+  emit, build and mutate (Phase 2); typed scalar accessors come in
+  Phase 3.
 - `src/FyamlStreams.Mod` (Phase 5): multi-document streams.
 - `Makefile`: build and test; see Build above.
 - `test/`: one main module per concern, plus `Check.Mod` and the YAML
@@ -255,7 +258,14 @@ which may keep pointing into it. See PLAN.md, "Buffer lifetime".
 - **Document what every mutating operation does to each
   `Node`/`Document` argument, on success and on failure.** libfyaml
   itself can consume or invalidate handles; `fy_document_insert_at`
-  always unrefs its node, whatever the outcome.
+  always unrefs its node, whatever the outcome, and `fy_node_insert`/
+  `fy_document_set_root` free the nodes they replace. That's why
+  `InsertAt` and a replacing `SetRoot` bump the document's generation
+  count and so kill every earlier Node (see PLAN.md, "Node
+  validity"); a new mutating call that can free nodes must do the
+  same. A node made by `Create*` must go through the orphan list
+  (`AddOrphan`/`DropOrphan`), since `fy_document_destroy` doesn't
+  free unattached nodes.
 - **Cleanup must be idempotent.** An explicit `Close` and the GC
   finalizer can both run on the same object, so `Close` must set the
   handle to 0 before or when it frees, and do nothing if it's already

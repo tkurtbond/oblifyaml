@@ -40,6 +40,8 @@ TYPE
 PROCEDURE -AincludeFyaml '#include <libfyaml.h>';
 PROCEDURE -AincludeStdlib '#include <stdlib.h>';
 PROCEDURE -AincludeString '#include <string.h>';
+PROCEDURE -AincludeStdio '#include <stdio.h>';
+PROCEDURE -AincludeErrno '#include <errno.h>';
 
 (* ---- Documents ---- *)
 
@@ -244,10 +246,132 @@ PROCEDURE NodeGetPath*(fyn: Node): SYSTEM.ADDRESS;
 BEGIN RETURN nodeGetPath(fyn)
 END NodeGetPath;
 
-(* ---- libc ---- *)
+(* ---- Building and mutating ---- *)
 
-PROCEDURE -AincludeStdio '#include <stdio.h>';
-PROCEDURE -AincludeErrno '#include <errno.h>';
+PROCEDURE -documentCreate(): Document "(ADDRESS)fy_document_create(NULL)";
+PROCEDURE -documentSetRoot(fyd: Document; fyn: Node): SYSTEM.INT32
+  "(INT32)fy_document_set_root((struct fy_document*)fyd, (struct fy_node*)fyn)";
+PROCEDURE -documentInsertAt(fyd: Document; path, len: SYSTEM.ADDRESS; fyn: Node): SYSTEM.INT32
+  "(INT32)fy_document_insert_at((struct fy_document*)fyd, (const char*)path, (size_t)len, (struct fy_node*)fyn)";
+PROCEDURE -nodeCreateScalarCopy(fyd: Document; data, size: SYSTEM.ADDRESS): Node
+  "(ADDRESS)fy_node_create_scalar_copy((struct fy_document*)fyd, (const char*)data, (size_t)size)";
+PROCEDURE -nodeCreateSequence(fyd: Document): Node
+  "(ADDRESS)fy_node_create_sequence((struct fy_document*)fyd)";
+PROCEDURE -nodeCreateMapping(fyd: Document): Node
+  "(ADDRESS)fy_node_create_mapping((struct fy_document*)fyd)";
+PROCEDURE -nodeIsAttached(fyn: Node): BOOLEAN
+  "(BOOLEAN)fy_node_is_attached((struct fy_node*)fyn)";
+PROCEDURE -nodeSequenceAppend(seq, fyn: Node): SYSTEM.INT32
+  "(INT32)fy_node_sequence_append((struct fy_node*)seq, (struct fy_node*)fyn)";
+PROCEDURE -nodeMappingAppend(map, key, value: Node): SYSTEM.INT32
+  "(INT32)fy_node_mapping_append((struct fy_node*)map, (struct fy_node*)key, (struct fy_node*)value)";
+
+PROCEDURE -nodeFree(fyn: Node): SYSTEM.INT32 "(INT32)fy_node_free((struct fy_node*)fyn)";
+
+(* Frees an unattached node and, recursively, everything attached to
+   it. Refuses (-1) an attached node. fy_document_destroy frees only
+   the tree, so a node created and never attached must be freed this
+   way or it leaks (confirmed live with valgrind). *)
+PROCEDURE NodeFree*(fyn: Node): SYSTEM.INT32;
+BEGIN RETURN nodeFree(fyn)
+END NodeFree;
+
+(* An empty document (no root), default config. 0 on failure. *)
+PROCEDURE DocumentCreate*(): Document;
+BEGIN RETURN documentCreate()
+END DocumentCreate;
+
+(* Makes fyn (unattached) the root. 0 on success, -1 if fyn is already
+   attached. FREES THE PREVIOUS ROOT TREE, if any (fy-doc.c:
+   fy_node_detach_and_free(fyd->root)). *)
+PROCEDURE DocumentSetRoot*(fyd: Document; fyn: Node): SYSTEM.INT32;
+BEGIN RETURN documentSetRoot(fyd, fyn)
+END DocumentSetRoot;
+
+(* Merges fyn into the node at path (fy_node_insert rules: a scalar,
+   or a node of a different kind, replaces the target and FREES it; a
+   mapping/sequence into the same kind merges, replacing and freeing
+   the values of duplicate keys). Then frees fyn -- unconditionally,
+   on success and failure (fy-doc.c calls fy_node_free(fyn), which
+   refuses only if fyn is attached). 0 on success, -1 on failure,
+   e.g. no node at path. *)
+PROCEDURE DocumentInsertAt*(fyd: Document; path, len: SYSTEM.ADDRESS; fyn: Node): SYSTEM.INT32;
+BEGIN RETURN documentInsertAt(fyd, path, len, fyn)
+END DocumentInsertAt;
+
+(* A new unattached scalar holding a copy of size bytes at data. *)
+PROCEDURE NodeCreateScalarCopy*(fyd: Document; data, size: SYSTEM.ADDRESS): Node;
+BEGIN RETURN nodeCreateScalarCopy(fyd, data, size)
+END NodeCreateScalarCopy;
+
+PROCEDURE NodeCreateSequence*(fyd: Document): Node;
+BEGIN RETURN nodeCreateSequence(fyd)
+END NodeCreateSequence;
+
+PROCEDURE NodeCreateMapping*(fyd: Document): Node;
+BEGIN RETURN nodeCreateMapping(fyd)
+END NodeCreateMapping;
+
+(* TRUE once fyn is part of a tree (root, item, key, or value). *)
+PROCEDURE NodeIsAttached*(fyn: Node): BOOLEAN;
+BEGIN RETURN nodeIsAttached(fyn)
+END NodeIsAttached;
+
+(* Attaches fyn (unattached, same document) at the end of seq. 0 on
+   success; -1 if seq is not a sequence, fyn is attached, or from
+   another document. Never frees fyn. *)
+PROCEDURE NodeSequenceAppend*(seq, fyn: Node): SYSTEM.INT32;
+BEGIN RETURN nodeSequenceAppend(seq, fyn)
+END NodeSequenceAppend;
+
+(* Attaches key and value (unattached, same document) as a new last
+   pair of map. 0 on success; -1 if map is not a mapping, either node
+   is attached or from another document, or key duplicates an
+   existing key (fy_node_mapping_pair_insert_prepare). Never frees
+   them. *)
+PROCEDURE NodeMappingAppend*(map, key, value: Node): SYSTEM.INT32;
+BEGIN RETURN nodeMappingAppend(map, key, value)
+END NodeMappingAppend;
+
+(* ---- Emitting ---- *)
+
+PROCEDURE -emitDocumentToString(fyd: Document; flags: SYSTEM.INT32): SYSTEM.ADDRESS
+  "(ADDRESS)fy_emit_document_to_string((struct fy_document*)fyd, (enum fy_emitter_cfg_flags)flags)";
+PROCEDURE -emitDocumentToFile(fyd: Document; flags: SYSTEM.INT32; file: SYSTEM.ADDRESS): SYSTEM.INT32
+  "({ errno = 0; int r_ = fy_emit_document_to_file((struct fy_document*)fyd, (enum fy_emitter_cfg_flags)flags, (const char*)file); (INT32)(r_ == 0 ? 0 : (errno ? errno : -1)); })";
+PROCEDURE -flagSortKeys(): SYSTEM.INT32 "(INT32)FYECF_SORT_KEYS";
+PROCEDURE -flagDefault(): SYSTEM.INT32 "(INT32)FYECF_DEFAULT";
+PROCEDURE -flagModeOriginal(): SYSTEM.INT32 "(INT32)FYECF_MODE_ORIGINAL";
+PROCEDURE -flagModeBlock(): SYSTEM.INT32 "(INT32)FYECF_MODE_BLOCK";
+PROCEDURE -flagModeFlow(): SYSTEM.INT32 "(INT32)FYECF_MODE_FLOW";
+PROCEDURE -flagModeFlowOneline(): SYSTEM.INT32 "(INT32)FYECF_MODE_FLOW_ONELINE";
+PROCEDURE -flagModeJson(): SYSTEM.INT32 "(INT32)FYECF_MODE_JSON";
+
+(* A malloc'd, 0X-terminated emission of fyd (free it with Free), or 0
+   on failure. *)
+PROCEDURE EmitDocumentToString*(fyd: Document; flags: SYSTEM.INT32): SYSTEM.ADDRESS;
+BEGIN RETURN emitDocumentToString(fyd, flags)
+END EmitDocumentToString;
+
+(* Writes fyd to the file named by file (0X-terminated), created or
+   truncated. 0 on success, else the errno (e.g. from fopen), or -1
+   for a failure that set none. *)
+PROCEDURE EmitDocumentToFile*(fyd: Document; flags: SYSTEM.INT32; file: SYSTEM.ADDRESS): SYSTEM.INT32;
+BEGIN RETURN emitDocumentToFile(fyd, flags, file)
+END EmitDocumentToFile;
+
+(* enum fy_emitter_cfg_flags values, read from the header rather than
+   retyped. The mode values form a multi-bit field: combine at most
+   one mode with FlagSortKeys. *)
+PROCEDURE FlagSortKeys*(): SYSTEM.INT32; BEGIN RETURN flagSortKeys() END FlagSortKeys;
+PROCEDURE FlagDefault*(): SYSTEM.INT32; BEGIN RETURN flagDefault() END FlagDefault;
+PROCEDURE FlagModeOriginal*(): SYSTEM.INT32; BEGIN RETURN flagModeOriginal() END FlagModeOriginal;
+PROCEDURE FlagModeBlock*(): SYSTEM.INT32; BEGIN RETURN flagModeBlock() END FlagModeBlock;
+PROCEDURE FlagModeFlow*(): SYSTEM.INT32; BEGIN RETURN flagModeFlow() END FlagModeFlow;
+PROCEDURE FlagModeFlowOneline*(): SYSTEM.INT32; BEGIN RETURN flagModeFlowOneline() END FlagModeFlowOneline;
+PROCEDURE FlagModeJson*(): SYSTEM.INT32; BEGIN RETURN flagModeJson() END FlagModeJson;
+
+(* ---- libc ---- *)
 
 PROCEDURE -free(p: SYSTEM.ADDRESS) "free((void*)p)";
 PROCEDURE -strlen(p: SYSTEM.ADDRESS): SYSTEM.ADDRESS "(ADDRESS)strlen((const char*)p)";

@@ -168,6 +168,26 @@ Every `Node` holds its `Document` pointer. So:
   labelled halt instead of a silent read of freed memory. Give each
   assertion a distinct code so a halt can be traced to its cause
   (codes listed in `Fyaml`'s header comment).
+- **Mutation is the second hazard (Phase 2).** `fy_node_insert` frees
+  the node it replaces (or the values of keys it overwrites), and
+  `fy_document_set_root` frees the whole previous root tree, so a Node
+  taken earlier can point at freed memory, and the binding can't
+  cheaply tell which ones. Each Document has a generation count `gen`;
+  a Node records it when made, and `InsertAt` (always) and `SetRoot`
+  (when it replaces an existing root) bump it. `Live` checks it, so a
+  stale Node halts with `AssertInvalid` (61, renamed from
+  `AssertClosed`) and `Valid` returns FALSE. This invalidates more
+  Nodes than strictly necessary; that's the price of never reading
+  freed memory. The Node `InsertAt`/`SetRoot` itself attached gets the
+  new `gen` where it survives (SetRoot's root does; InsertAt's node is
+  consumed).
+- **Unattached nodes (Phase 2).** `fy_document_destroy` frees only the
+  tree under the root; a node made by `Create*` and never attached
+  leaks (confirmed live: 4 blocks for one scalar, 10 for a mapping
+  with one pair). Each Document keeps a list of its unattached created
+  nodes (`orphans`); attaching drops a node from it, and `Close` calls
+  `fy_node_free` on what's left before destroying the document.
+  alibfyaml and slibfyaml have the same leak.
 
 ### Buffer lifetime
 
@@ -210,9 +230,33 @@ practice:
 
 As in alibfyaml: `fy_document_insert_at` **always** unrefs its node,
 whether it succeeds or fails. `InsertAt` therefore sets
-`n.handle := 0` in every case. Every mutating procedure's comment says
-what happens to each `Node`/`Document` argument on success and on
-failure.
+`n.handle := 0` and `n := NIL` (it takes `VAR n`) in every case. Every
+mutating procedure's comment says what happens to each
+`Node`/`Document` argument on success and on failure. Confirmed live
+in Phase 2:
+
+- `fy_document_insert_at` fails when there is no node at the path, and
+  still frees the node. `InsertAt` looks the path up first so it can
+  say which failure it was (`PathError`: "no node at this path" or
+  "cannot insert here").
+- `fy_node_insert` replaces a scalar target, merges a mapping into a
+  mapping (new keys added, equal keys' values replaced and freed, the
+  rest kept), and appends a sequence's items to a sequence.
+- `fy_document_set_root` frees the previous root tree and refuses a
+  node that is already attached.
+- `fy_node_mapping_append` refuses a duplicate key, an attached node,
+  or a node of another document; `fy_node_free` refuses an attached
+  node. Of these, only a duplicate key is a data error
+  (`DuplicateKey`, both nodes stay unattached and usable); attaching an
+  attached node or one from another document is a programmer error
+  (`AssertAttach`, 64), as is `Append` on a non-sequence (`AssertKind`).
+- `fy_emit_document_to_string` returns NULL for a document with no
+  root, so `ToYAML`/`ToFile` report an empty document as `EmitError`
+  up front.
+- `fy_emit_document_to_file` opens with mode `"wa"`, which in glibc
+  truncates like `"w"`: writing a file twice leaves one copy.
+  libfyaml prints the open failure on stderr only, so `ToFile` reads
+  `errno` itself to give a `FileError` with the OS reason.
 
 ## Error handling (Oberon-2 has no exceptions)
 
@@ -422,13 +466,42 @@ valgrind, with findings written into this file.
      finalizer check fail.
    - voc exit statuses: `ASSERT` failure = its code; NIL method call =
      246. voc rejects an `ASSERT` it can prove false at compile time.
-2. **Emit and build/mutate.** `ToYAML(flags)` and `ToFile`, with the
-   emitter flag constants taken from the header through code
-   procedures rather than retyped. `NewDocument`,
-   `CreateScalar`/`Sequence`/`Mapping` (copying: `fy_node_create_scalar_copy`),
-   `Append`, `AppendPair`, `SetRoot`, and `InsertAt` with its
-   unconditional-consume contract. Port `TestQuickstart` in full,
-   `TestSequence`, and `TestMutate`.
+2. **`[done]` Emit and build/mutate.** `ToYAML(flags)` and `ToFile`,
+   with the emitter flags (`emitDefault-`, `emitSortKeys-`,
+   `emitModeOriginal-`/`Block-`/`Flow-`/`FlowOneline-`/`Json-`) read
+   from the header's `#define`s through code procedures into
+   read-only variables. `NewDocument`,
+   `CreateScalar`/`Sequence`/`Mapping` (copying:
+   `fy_node_create_scalar_copy`), `Append`, `AppendPair`, `SetRoot`,
+   and `InsertAt` with its unconditional-consume contract. New error
+   kinds `EmitError`, `PathError`, `DuplicateKey`; new halt code
+   `AssertAttach` (64); `AssertClosed` renamed `AssertInvalid` since it
+   now also covers stale Nodes. Tests:
+   - `TestBuild` (23 checks): build a tree, exact `ToYAML` output in
+     each mode (taken from libfyaml's actual output), a round trip
+     through `ParseString`, `DuplicateKey`, `ToFile` twice then
+     `ParseFile`, `ToFile` into a missing directory, the empty-document
+     `EmitError`, and SetRoot killing old Nodes.
+   - `TestMutate` (11): alibfyaml's port plus stale-Node checks:
+     scalar replace, mapping merge, sequence append, missing path.
+   - `TestQuickstart` in full (10): the `{timeout: 45}` patch merged
+     into `/server` and emitted with `emitSortKeys`.
+   - Halt tests `HaltStale` (61), `HaltAttach` (64, other document),
+     `HaltAttached` (64, attached twice).
+   - alibfyaml's `test_sequence` is a read-only demo whose checks
+     `TestNavigate` already makes, so it wasn't ported separately.
+
+   All pass, and all are clean under valgrind, with still-reachable at
+   exactly voc's heap chunk. Found while doing it (see also Memory
+   model and Consumption contracts above):
+   - **Created-but-unattached nodes leak** through
+     `fy_document_destroy`; fixed with the orphan list.
+   - **That leak shows only as still-reachable**, because the Oberon
+     heap still holds the node addresses, so the old `make valgrind`
+     passed with the fix disabled. `make valgrind` now also fails
+     unless each test's still-reachable is exactly
+     `256,024 bytes in 1 blocks`; with the orphan free disabled it
+     fails on `TestBuild` (14 blocks), and it passes with it enabled.
 3. **Typed scalars.** Everything under "Typed scalars", with `Path`
    and `Location` in errors. Port `TestScalars` using
    alibfyaml's `scalars.yaml`.

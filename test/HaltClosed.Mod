@@ -1,6 +1,6 @@
 MODULE HaltClosed; (* Expected to halt: a Node used after its Document's Close *)
 
-(* Run by `make test`, which requires exit status Fyaml.AssertClosed
+(* Run by `make test`, which requires exit status Fyaml.AssertInvalid
    (61). Reaching the end means the check failed. *)
 
 IMPORT Fyaml, Out;

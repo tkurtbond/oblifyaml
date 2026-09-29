@@ -23,10 +23,10 @@ LIBMODS := FyThin Fyaml
 # Test support modules, in import order.
 TESTSUPPORT := Check
 # Test programs (test/<name>.Mod, each a main module).
-TESTS := TestThin TestParseErrors TestQuickstart TestNavigate TestPath TestLiveness
+TESTS := TestThin TestParseErrors TestQuickstart TestNavigate TestPath TestLiveness TestBuild TestMutate
 # Programs that must halt (test/<name>.Mod), as name:required-exit-status;
 # the status is one of Fyaml's Assert* codes.
-HALTTESTS := HaltClosed:61 HaltKind:62 HaltIndex:63
+HALTTESTS := HaltClosed:61 HaltKind:62 HaltIndex:63 HaltStale:61 HaltAttach:64 HaltAttached:64
 
 LIBOBJS  := $(LIBMODS:%=$(BUILD)/%.o)
 SUPPOBJS := $(TESTSUPPORT:%=$(BUILD)/%.o)
@@ -80,9 +80,17 @@ test: tests
 	  else echo "FAIL - $$t exited with $$got, not $$want"; status=1; fi; \
 	done; exit $$status
 
+# Besides definite/indirect leaks, still-reachable must be exactly
+# voc's one heap chunk: leaked libfyaml memory whose address is still
+# held in the Oberon heap (e.g. unfreed orphan nodes) shows up only as
+# extra still-reachable blocks.
+REACHABLE := still reachable: 256,024 bytes in 1 blocks
 valgrind: tests
 	@status=0; for t in $(TESTS); do \
-	  echo "== valgrind $$t"; (cd test && $(VALGRIND) ../$(BUILD)/$$t) || status=1; \
+	  echo "== valgrind $$t"; \
+	  (cd test && $(VALGRIND) --log-file=../$(BUILD)/$$t.vg ../$(BUILD)/$$t) || status=1; \
+	  grep -E 'ERROR SUMMARY|lost:|reachable:' $(BUILD)/$$t.vg; \
+	  grep -q '$(REACHABLE)' $(BUILD)/$$t.vg || { echo "FAIL - $$t: expected '$(REACHABLE)'"; status=1; }; \
 	done; exit $$status
 
 clean:

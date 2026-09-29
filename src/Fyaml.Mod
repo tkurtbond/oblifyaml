@@ -1,6 +1,7 @@
 MODULE Fyaml; (* Oberon-2 binding to libfyaml: documents, nodes, errors *)
 
-(* Parse YAML/JSON into a Document and navigate its Nodes.
+(* Parse YAML/JSON into a Document, navigate and change its Nodes,
+   and emit it back out.
 
    Ownership. A Document owns its libfyaml tree. Close it when done:
    Close is idempotent, and a GC finalizer closes any Document that
@@ -10,9 +11,18 @@ MODULE Fyaml; (* Oberon-2 binding to libfyaml: documents, nodes, errors *)
 
    Nodes. A Node is a small heap object holding its Document, so the
    GC can never destroy a document that a reachable Node still uses.
-   After an explicit Close, every Node from that document is dead:
-   calling one of its methods halts (ASSERT code AssertClosed); use
-   Valid to test without halting.
+   A Node dies when its Document is closed, and ALSO when InsertAt
+   (or SetRoot replacing an existing root) is called on its Document:
+   libfyaml frees the nodes those calls replace, and this binding
+   can't tell which ones, so it invalidates every Node taken from the
+   document before the call (a per-document generation count). Get
+   Nodes again from Root/ByPath afterwards. Calling a method of a dead
+   Node halts (ASSERT code AssertInvalid) instead of reading freed
+   memory; use Valid to test without halting.
+
+   Building. NewDocument gives an empty document; Create* make
+   unattached nodes; Append, AppendPair and SetRoot attach them. A node
+   can be attached only once, and only within its own document.
 
    Errors. Bad input and missing files are ordinary results: calls
    that can fail on them return NIL/FALSE and hand back an Error in a
@@ -26,7 +36,7 @@ MODULE Fyaml; (* Oberon-2 binding to libfyaml: documents, nodes, errors *)
    (a double-quoted "\0"); Scalar copies all of its bytes, so use
    ScalarLen for the real length rather than stopping at the first 0X.
 
-   Indexes are 0-based, as in By_Path's "/tags/0" and Oberon arrays
+   Indexes are 0-based, as in ByPath's "/tags/0" and Oberon arrays
    (alibfyaml's Item is 1-based). *)
 
 IMPORT SYSTEM, Heap, FyThin;
@@ -34,24 +44,29 @@ IMPORT SYSTEM, Heap, FyThin;
 CONST
   (* Error kinds *)
   ParseError* = 1;   (* malformed input *)
-  FileError* = 2;    (* ParseFile: the file can't be opened (msg gives the OS reason) *)
+  FileError* = 2;    (* ParseFile/ToFile: the file can't be opened (msg gives the OS reason) *)
+  EmitError* = 3;    (* ToYAML/ToFile: libfyaml failed to emit *)
+  PathError* = 4;    (* InsertAt: no node at the path, or it can't take the insert *)
+  DuplicateKey* = 5; (* AppendPair: the mapping already has an equal key *)
 
   (* Node kinds, as returned by Kind *)
   KindScalar* = 0; KindSequence* = 1; KindMapping* = 2;
 
   (* ASSERT codes for programmer errors (also the exit status) *)
-  AssertClosed* = 61;  (* document closed, or node from a closed document *)
+  AssertInvalid* = 61; (* document closed, or node dead (closed, or before InsertAt/SetRoot) *)
   AssertKind* = 62;    (* operation not valid for this node's kind *)
   AssertIndex* = 63;   (* index out of range *)
+  AssertAttach* = 64;  (* node already attached, or from another document *)
 
   stringName = "(string-in-memory)";  (* file name reported for ParseString input *)
 
 TYPE
   String* = POINTER TO ARRAY OF CHAR;
+  Handles = POINTER TO ARRAY OF SYSTEM.ADDRESS;
 
   Error* = POINTER TO ErrorDesc;
   ErrorDesc* = RECORD
-    kind-: INTEGER;           (* ParseError, FileError *)
+    kind-: INTEGER;           (* ParseError, FileError, EmitError, PathError, DuplicateKey *)
     file-: String;            (* file of the first error; never NIL *)
     line-, column-: INTEGER;  (* of the first error; 1-based, 0 = unknown *)
     msg-: String              (* every error, one "file:line:column: error: text" line each *)
@@ -60,13 +75,19 @@ TYPE
   Document* = POINTER TO DocumentDesc;
   DocumentDesc* = RECORD
     handle: FyThin.Document;  (* 0 once closed *)
-    buffer: String            (* ParseString input: libfyaml's scalars span into it *)
+    buffer: String;           (* ParseString input: libfyaml's scalars span into it *)
+    gen: LONGINT;             (* bumped by InsertAt/SetRoot: older Nodes are dead *)
+    (* Nodes made by Create* and not attached yet: libfyaml frees only
+       the tree when a document is destroyed, so Close frees these. *)
+    orphans: Handles;
+    norphans: LONGINT
   END;
 
   Node* = POINTER TO NodeDesc;
   NodeDesc* = RECORD
-    handle: FyThin.Node;
-    doc: Document             (* owner: liveness check, and keeps it reachable *)
+    handle: FyThin.Node;      (* 0 once consumed by InsertAt *)
+    doc: Document;            (* owner: liveness check, and keeps it reachable *)
+    gen: LONGINT              (* doc.gen when made; dead once they differ *)
   END;
 
   (* done: libfyaml's *_iterate ends by resetting the cursor to NULL,
@@ -77,7 +98,14 @@ TYPE
   PairIter* = RECORD node: Node; prev: SYSTEM.ADDRESS; done: BOOLEAN END;
 
 VAR
-  openDocuments-: LONGINT;  (* documents parsed and not yet closed or finalized *)
+  openDocuments-: LONGINT;  (* documents made and not yet closed or finalized *)
+
+  (* Emitter flags for ToYAML/ToFile, read from libfyaml's header at
+     start-up. Combine with +: at most one emitMode*, plus
+     emitSortKeys. emitDefault is libfyaml's default (original mode,
+     unlimited line width); 0 is original mode, width 80. *)
+  emitDefault-, emitSortKeys-, emitModeOriginal-, emitModeBlock-,
+  emitModeFlow-, emitModeFlowOneline-, emitModeJson-: INTEGER;
 
 (* ---- Strings ---- *)
 
@@ -180,12 +208,41 @@ END Collected;
 
 (* ---- Documents ---- *)
 
+(* Records h as a created, not yet attached node of d. *)
+PROCEDURE AddOrphan(d: Document; h: FyThin.Node);
+  VAR a: Handles; i: LONGINT;
+BEGIN
+  IF d.orphans = NIL THEN NEW(d.orphans, 16)
+  ELSIF d.norphans = LEN(d.orphans^) THEN
+    NEW(a, 2 * d.norphans);
+    FOR i := 0 TO d.norphans - 1 DO a[i] := d.orphans[i] END;
+    d.orphans := a
+  END;
+  d.orphans[d.norphans] := h; INC(d.norphans)
+END AddOrphan;
+
+(* Forgets h once it is attached or freed. Searches from the end: a
+   node is usually attached soon after it is created. *)
+PROCEDURE DropOrphan(d: Document; h: FyThin.Node);
+  VAR i: LONGINT;
+BEGIN
+  i := d.norphans - 1;
+  WHILE (i >= 0) & (d.orphans[i] # h) DO DEC(i) END;
+  IF i >= 0 THEN
+    DEC(d.norphans); d.orphans[i] := d.orphans[d.norphans]
+  END
+END DropOrphan;
+
 (* Idempotent: frees the tree once; later calls do nothing. *)
 PROCEDURE CloseHandle(d: Document);
-  VAR h: FyThin.Document;
+  VAR h: FyThin.Document; i: LONGINT;
 BEGIN
   IF d.handle # 0 THEN
     h := d.handle; d.handle := 0;  (* dead before freed: no second free *)
+    FOR i := 0 TO d.norphans - 1 DO
+      ASSERT(FyThin.NodeFree(d.orphans[i]) = 0)  (* unattached by construction *)
+    END;
+    d.orphans := NIL; d.norphans := 0;
     FyThin.DocumentDestroy(h);
     DEC(openDocuments)
   END;
@@ -198,6 +255,16 @@ END CloseHandle;
 PROCEDURE FinalizeDocument(obj: SYSTEM.PTR);
 BEGIN CloseHandle(SYSTEM.VAL(Document, obj))
 END FinalizeDocument;
+
+(* Wraps a new libfyaml document handle, registering the finalizer. *)
+PROCEDURE NewDoc(h: FyThin.Document; buffer: String): Document;
+  VAR d: Document;
+BEGIN
+  NEW(d); d.handle := h; d.buffer := buffer; d.gen := 0; d.orphans := NIL; d.norphans := 0;
+  INC(openDocuments);
+  Heap.RegisterFinalizer(d, FinalizeDocument);
+  RETURN d
+END NewDoc;
 
 (* Parses from the string (buffer # NIL, len bytes) or from the file
    named by path. name labels errors when libfyaml gives no file name.
@@ -219,10 +286,7 @@ BEGIN
   IF h = 0 THEN err := Collected(diag, fileOverride, name) END;
   FyThin.DiagDestroy(diag);
   IF h = 0 THEN RETURN NIL END;
-  NEW(d); d.handle := h; d.buffer := buffer;
-  INC(openDocuments);
-  Heap.RegisterFinalizer(d, FinalizeDocument);
-  RETURN d
+  RETURN NewDoc(h, buffer)
 END Build;
 
 (* Parses text (up to its first 0X) as one YAML document. Anchors,
@@ -266,26 +330,27 @@ PROCEDURE NewNode(d: Document; h: FyThin.Node): Node;
   VAR n: Node;
 BEGIN
   IF h = 0 THEN RETURN NIL END;
-  NEW(n); n.handle := h; n.doc := d;
+  NEW(n); n.handle := h; n.doc := d; n.gen := d.gen;
   RETURN n
 END NewNode;
 
 (* The root node, or NIL for an empty document. *)
 PROCEDURE (d: Document) Root*(): Node;
 BEGIN
-  ASSERT(d.handle # 0, AssertClosed);
+  ASSERT(d.handle # 0, AssertInvalid);
   RETURN NewNode(d, FyThin.DocumentRoot(d.handle))
 END Root;
 
 (* ---- Nodes ---- *)
 
-(* TRUE if n is not NIL and its document is still open. *)
+(* TRUE if n is not NIL and still usable: its document is open, and
+   n was not consumed by, or taken before, an InsertAt/SetRoot on it. *)
 PROCEDURE Valid*(n: Node): BOOLEAN;
-BEGIN RETURN (n # NIL) & (n.handle # 0) & (n.doc.handle # 0)
+BEGIN RETURN (n # NIL) & (n.handle # 0) & (n.doc.handle # 0) & (n.gen = n.doc.gen)
 END Valid;
 
 PROCEDURE Live(n: Node);
-BEGIN ASSERT((n.handle # 0) & (n.doc.handle # 0), AssertClosed)
+BEGIN ASSERT((n.handle # 0) & (n.doc.handle # 0) & (n.gen = n.doc.gen), AssertInvalid)
 END Live;
 
 PROCEDURE (n: Node) IsScalar*(): BOOLEAN;
@@ -446,5 +511,177 @@ BEGIN
   RETURN TRUE
 END Next;
 
-BEGIN openDocuments := 0
+(* ---- Building and changing ---- *)
+
+(* A new empty document (no root), to fill with Create* and SetRoot. *)
+PROCEDURE NewDocument*(): Document;
+  VAR h: FyThin.Document;
+BEGIN
+  h := FyThin.DocumentCreate();
+  ASSERT(h # 0);  (* allocation failure *)
+  RETURN NewDoc(h, NIL)
+END NewDocument;
+
+(* A new unattached node in d; a copy of text up to its first 0X. *)
+PROCEDURE (d: Document) CreateScalar*(text: ARRAY OF CHAR): Node;
+  VAR h: FyThin.Node;
+BEGIN
+  ASSERT(d.handle # 0, AssertInvalid);
+  h := FyThin.NodeCreateScalarCopy(d.handle, SYSTEM.ADR(text[0]), Length(text));
+  ASSERT(h # 0); AddOrphan(d, h);
+  RETURN NewNode(d, h)
+END CreateScalar;
+
+PROCEDURE (d: Document) CreateSequence*(): Node;
+  VAR h: FyThin.Node;
+BEGIN
+  ASSERT(d.handle # 0, AssertInvalid);
+  h := FyThin.NodeCreateSequence(d.handle); ASSERT(h # 0); AddOrphan(d, h);
+  RETURN NewNode(d, h)
+END CreateSequence;
+
+PROCEDURE (d: Document) CreateMapping*(): Node;
+  VAR h: FyThin.Node;
+BEGIN
+  ASSERT(d.handle # 0, AssertInvalid);
+  h := FyThin.NodeCreateMapping(d.handle); ASSERT(h # 0); AddOrphan(d, h);
+  RETURN NewNode(d, h)
+END CreateMapping;
+
+(* Halts unless n is a live, unattached node of d. *)
+PROCEDURE Attachable(d: Document; n: Node);
+BEGIN
+  Live(n);
+  ASSERT((n.doc = d) & ~FyThin.NodeIsAttached(n.handle), AssertAttach)
+END Attachable;
+
+(* Makes n (unattached, from d) the root. If d already has a root,
+   libfyaml frees that whole tree, so every Node taken from d before
+   this call dies -- except n, which stays usable. Unattached nodes
+   built before the call die too in that case: attach them first. On a
+   NewDocument (no root yet) nothing dies. *)
+PROCEDURE (d: Document) SetRoot*(n: Node);
+  VAR hadRoot: BOOLEAN;
+BEGIN
+  ASSERT(d.handle # 0, AssertInvalid);
+  Attachable(d, n);
+  hadRoot := FyThin.DocumentRoot(d.handle) # 0;
+  ASSERT(FyThin.DocumentSetRoot(d.handle, n.handle) = 0);  (* preconditions checked above *)
+  DropOrphan(d, n.handle);
+  IF hadRoot THEN INC(d.gen); n.gen := d.gen END
+END SetRoot;
+
+(* Merges n into the node at path, by libfyaml's rules: a scalar, or a
+   node of a different kind, replaces the target; a mapping into a
+   mapping adds its pairs (replacing the values of equal keys); a
+   sequence into a sequence appends its items. n is copied in and then
+   FREED by libfyaml whatever the outcome, so n is set to NIL (and any
+   other copy of it dies). Every Node taken from d before this call
+   dies too, since the replaced nodes are freed. Returns FALSE with a
+   PathError if there is no node at path or libfyaml refuses. *)
+PROCEDURE (d: Document) InsertAt*(path: ARRAY OF CHAR; VAR n: Node; VAR err: Error): BOOLEAN;
+  VAR rc: INTEGER; target: FyThin.Node; len: LONGINT; file: String;
+BEGIN
+  ASSERT(d.handle # 0, AssertInvalid);
+  Live(n);
+  ASSERT(n.doc = d, AssertAttach);
+  err := NIL;
+  len := Length(path);
+  target := FyThin.NodeByPath(FyThin.DocumentRoot(d.handle), SYSTEM.ADR(path[0]), len);
+  rc := FyThin.DocumentInsertAt(d.handle, SYSTEM.ADR(path[0]), len, n.handle);
+  DropOrphan(d, n.handle);  (* freed by libfyaml *)
+  n.handle := 0; n := NIL;
+  INC(d.gen);
+  IF rc # 0 THEN
+    file := FromChars(path);
+    IF target = 0 THEN err := NewError(PathError, file, "no node at this path")
+    ELSE err := NewError(PathError, file, "cannot insert here")
+    END
+  END;
+  RETURN rc = 0
+END InsertAt;
+
+(* Attaches item (unattached, same document) at the end of sequence n. *)
+PROCEDURE (n: Node) Append*(item: Node);
+BEGIN
+  ASSERT(n.IsSequence(), AssertKind);
+  Attachable(n.doc, item);
+  ASSERT(FyThin.NodeSequenceAppend(n.handle, item.handle) = 0);  (* preconditions checked above *)
+  DropOrphan(n.doc, item.handle)
+END Append;
+
+(* Attaches key and value (unattached, same document) as the last pair
+   of mapping n. Returns FALSE with a DuplicateKey error, attaching
+   nothing, if n already has an equal key; key and value stay usable. *)
+PROCEDURE (n: Node) AppendPair*(key, value: Node; VAR err: Error): BOOLEAN;
+  VAR path, k: String; len: LONGINT;
+BEGIN
+  ASSERT(n.IsMapping(), AssertKind);
+  Attachable(n.doc, key); Attachable(n.doc, value);
+  ASSERT(key # value, AssertAttach);
+  err := NIL;
+  IF FyThin.NodeMappingAppend(n.handle, key.handle, value.handle) = 0 THEN
+    DropOrphan(n.doc, key.handle); DropOrphan(n.doc, value.handle);
+    RETURN TRUE
+  END;
+  (* The only failure left after the checks above is a duplicate key. *)
+  path := n.Path();
+  NEW(err); err.kind := DuplicateKey; err.file := path; err.line := 0; err.column := 0;
+  len := 0;
+  Append(err.msg, len, path^); Append(err.msg, len, ": error: duplicate key");
+  IF key.IsScalar() THEN
+    k := key.Scalar(); Append(err.msg, len, ' "'); Append(err.msg, len, k^); Append(err.msg, len, '"')
+  END;
+  Append(err.msg, len, 0AX);
+  RETURN FALSE
+END AppendPair;
+
+(* ---- Emitting ---- *)
+
+(* d as YAML text (or JSON, with emitModeJson). flags: see emitDefault.
+   Returns NIL with an EmitError if libfyaml fails, or if d is empty
+   (no root): libfyaml emits nothing for one (confirmed live). *)
+PROCEDURE (d: Document) ToYAML*(flags: INTEGER; VAR err: Error): String;
+  VAR p: SYSTEM.ADDRESS; s: String;
+BEGIN
+  ASSERT(d.handle # 0, AssertInvalid);
+  err := NIL;
+  IF FyThin.DocumentRoot(d.handle) = 0 THEN
+    err := NewError(EmitError, FromChars("(emit)"), "document is empty (no root)"); RETURN NIL
+  END;
+  p := FyThin.EmitDocumentToString(d.handle, flags);
+  IF p = 0 THEN err := NewError(EmitError, FromChars("(emit)"), "emitting the document failed"); RETURN NIL END;
+  s := FromCString(p); FyThin.Free(p);
+  RETURN s
+END ToYAML;
+
+(* Writes d to the file at path, created or truncated (libfyaml opens
+   it "wa", which glibc treats as "w": confirmed live). Returns FALSE
+   with a FileError (the OS reason) or EmitError on failure, including
+   an empty document. *)
+PROCEDURE (d: Document) ToFile*(path: ARRAY OF CHAR; flags: INTEGER; VAR err: Error): BOOLEAN;
+  VAR p, reason: String; rc: INTEGER;
+BEGIN
+  ASSERT(d.handle # 0, AssertInvalid);
+  err := NIL;
+  p := FromChars(path);
+  IF FyThin.DocumentRoot(d.handle) = 0 THEN
+    err := NewError(EmitError, p, "document is empty (no root)"); RETURN FALSE
+  END;
+  rc := FyThin.EmitDocumentToFile(d.handle, flags, SYSTEM.ADR(p[0]));
+  IF rc > 0 THEN reason := FromCString(FyThin.Strerror(rc)); err := NewError(FileError, p, reason^)
+  ELSIF rc < 0 THEN err := NewError(EmitError, p, "emitting the document failed")
+  END;
+  RETURN rc = 0
+END ToFile;
+
+BEGIN
+  openDocuments := 0;
+  emitDefault := FyThin.FlagDefault();
+  emitSortKeys := FyThin.FlagSortKeys();
+  emitModeOriginal := FyThin.FlagModeOriginal();
+  emitModeBlock := FyThin.FlagModeBlock();
+  emitModeFlow := FyThin.FlagModeFlow();
+  emitModeFlowOneline := FyThin.FlagModeFlowOneline();
+  emitModeJson := FyThin.FlagModeJson()
 END Fyaml.

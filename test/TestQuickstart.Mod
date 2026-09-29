@@ -1,15 +1,15 @@
-MODULE TestQuickstart; (* Read side of libfyaml's examples/quick-start.c *)
+MODULE TestQuickstart; (* libfyaml's examples/quick-start.c *)
 
-(* Port of the read side of alibfyaml's test_quickstart.adb (itself a
-   port of libfyaml's examples/quick-start.c), on the same
-   config.yaml: parse a file, read nested values, print the current
-   configuration. The mutate-and-emit half waits for Phase 2. *)
+(* Port of alibfyaml's test_quickstart.adb (itself a port of
+   libfyaml's examples/quick-start.c), on the same config.yaml: parse
+   a file, read nested values, print the current configuration, merge
+   a {timeout: 45} patch into /server, and emit the result. *)
 
 IMPORT Fyaml, Check, Out;
 
 PROCEDURE Run;
-  VAR d: Fyaml.Document; err: Fyaml.Error; root, server, host, port, origins, n: Fyaml.Node;
-    s: Fyaml.String;
+  VAR d: Fyaml.Document; err: Fyaml.Error; root, server, host, port, origins, n, patch, k, v: Fyaml.Node;
+    s: Fyaml.String; ok: BOOLEAN;
 BEGIN
   d := Fyaml.ParseFile("config.yaml", err);
   IF d = NIL THEN
@@ -36,6 +36,23 @@ BEGIN
   Check.Check(n.ScalarIs("https://www.example.com"), "allowed_origins Item(1)");
   n := root.Value("logging"); n := n.Value("max_size");
   Check.Check(n.ScalarIs("100M"), "logging.max_size stays text");
+
+  (* Merge {timeout: 45} into /server (fy_node_insert rules: keys are
+     added or replaced, others kept). This kills root, server, etc. *)
+  patch := d.CreateMapping();
+  k := d.CreateScalar("timeout"); v := d.CreateScalar("45");
+  ok := patch.AppendPair(k, v, err) & d.InsertAt("/server", patch, err);
+  Check.Check(ok, "InsertAt of the timeout patch");
+  Out.String("Updated timeout setting"); Out.Ln;
+  root := d.Root();
+  n := root.ByPath("/server/timeout");
+  Check.Check((n # NIL) & n.ScalarIs("45"), "/server/timeout = 45");
+  n := root.ByPath("/server/host");
+  Check.Check(n.ScalarIs("localhost"), "/server/host kept by the merge");
+
+  s := d.ToYAML(Fyaml.emitSortKeys, err);
+  Check.Check((s # NIL) & (err = NIL), "ToYAML with emitSortKeys");
+  IF s # NIL THEN Out.String("Updated configuration:"); Out.Ln; Out.String(s^) END;
 
   d.Close
 END Run;
