@@ -1,0 +1,2 @@
+# voc/gcc output (.c, .h, .sym, .o, test executables): see Makefile
+/build/

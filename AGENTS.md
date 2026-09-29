@@ -37,22 +37,33 @@ before assuming it's missing, e.g.
 export PATH=/usr/local/sw/versions/voc/git/bin:$PATH
 ```
 
-voc translates each module to C (`Mod.c`, `Mod.h`, `Mod.sym`) **in the
-current directory**, then calls gcc. Modules must be compiled in
-import order, and the main module last with `-m`. Extra C flags come
-from environment variables that voc reads itself (`src/compiler/extTools.Mod`):
-`CFLAGS` (every compile), and `LDFLAGS`/`LDLIBS` (main-module link
-only). Link libfyaml with:
+Use the `Makefile`; don't invoke voc by hand:
 
 ```sh
-LDLIBS="$(pkg-config --libs libfyaml)" voc -OC -s FyThin.Mod ... Test.Mod -m
+make            # library + test programs, into build/
+make test       # run every test program (from test/, so fixtures resolve)
+make valgrind   # the same, each under valgrind
+make clean      # rm -rf build
 ```
 
-`-s` lets voc create or change a module's `.sym` file. Without it, a
-changed interface is a compile error. The planned `Makefile` (PLAN.md
-Phase 0) wraps all of this and keeps generated files in `build/`. Use
-it rather than invoking voc by hand once it exists. Add `-V` to see
-the exact gcc command voc runs.
+What it wraps: voc translates each module to C (`Mod.c`, `Mod.h`,
+`Mod.sym`, `Mod.o`) **in the current directory**, so every voc call
+runs inside `build/`, and voc's symbol search path starts at `.`,
+which is how later modules find earlier ones' `.sym`. Modules must be
+compiled in import order, and main modules with `-m`. `-s` lets voc
+create or change a `.sym` (without it, a changed interface is a
+compile error). voc reads extra flags from the environment itself
+(`src/compiler/extTools.Mod`): `CFLAGS` for every compile, and
+`LDFLAGS`/`LDLIBS` only when linking a main module. The Makefile
+exports `LDLIBS=$(pkg-config --libs libfyaml)`. Add `-V` to a voc
+command to see the exact gcc command it runs.
+
+**Make targets are the `.o` files, not the `.sym` files.** voc leaves
+an unchanged `.sym` untouched (old mtime), so a `.sym` target never
+looks up to date. **Adding a module takes Makefile edits**: append it
+to `LIBMODS` (or `TESTSUPPORT`) in import order, and add an explicit
+`$(BUILD)/New.o: $(BUILD)/Imported.o` line for each module it
+imports. Make has no other way to learn the import order.
 
 Integer size model: **build every module with `-OC`**, as the first
 option on the voc command line so it applies to every file. This is
@@ -70,14 +81,21 @@ The thick layer (`Fyaml`, `FyamlStreams`) uses plain `INTEGER`/`LONGINT`.
 
 ## Test
 
-Planned (PLAN.md Phase 0): one standalone main module per concern in
-`test/` (`TestQuickstart.Mod`, `TestNavigate.Mod`, ...), each printing
-`ok   - <label>` / `FAIL - <label>` per check via a shared `Check`
-module and ending with `All checks passed.` or `<N> check(s) failed.`
-To judge a run, grep for `FAIL` or read the last line; the exit
-status alone isn't enough. YAML fixtures are copied from
-`~/Repos/Ada/alibfyaml/test/*.yaml` where one fits, so all three
+Each test is its own main module in `test/` (`TestThin.Mod` so far),
+printing `ok   - <label>` / `FAIL - <label>` per check through the
+shared `test/Check.Mod`, and ending with `All checks passed.` or
+`<N> check(s) failed.` A failing run exits 1, so `make test` fails. To
+judge a run, grep for `FAIL` or read the last line. **Adding a test
+means adding its name to `TESTS` in the Makefile.** YAML fixtures go
+in `test/` (tests run with `test/` as their working directory), copied
+from `~/Repos/Ada/alibfyaml/test/*.yaml` where one fits, so all three
 bindings are tested against the same inputs.
+
+`Check.Summary` calls `Platform.Exit(1)` **only** on failure. That
+calls C `exit()` directly and skips `Heap.FINALL`, the exit-time run
+of GC finalizers. A passing run returns normally from the main module
+body so the finalizers run and valgrind's leak report stays meaningful.
+Keep it that way, and never end a test with `Platform.Exit(0)`.
 
 ### Valgrind: necessary, but NOT sufficient here
 
@@ -87,7 +105,11 @@ Run anything that touches ownership or lifetime under
 valgrind --leak-check=full --show-leak-kinds=definite,indirect --error-exitcode=99 ./build/TestWhatever
 ```
 
-before calling it done, the same rule as alibfyaml. **But valgrind
+(or `make valgrind`) before calling it done, the same rule as
+alibfyaml. **Expected and harmless:** one block of about 256 KB
+"still reachable", allocated by voc's own `Heap_InitHeap` (its GC heap
+chunk, never freed at exit). The `--show-leak-kinds` above already
+leaves it out. **But valgrind
 cannot see one bug class that is specific to voc, and it has already
 happened once (confirmed live in the Phase 0 spike):**
 
@@ -101,13 +123,14 @@ heap. The only defence is design plus tests that check actual values:
 never pass memory to libfyaml that doesn't outlive the libfyaml object
 which may keep pointing into it. See PLAN.md, "Buffer lifetime".
 
-## Layout (planned, see PLAN.md)
+## Layout
 
 - `src/FyThin.Mod`: low-level libfyaml calls. No ownership or error
   policy.
-- `src/Fyaml.Mod`: `Document`, `Node`, error results, typed scalar
-  accessors.
-- `src/FyamlStreams.Mod`: multi-document streams.
+- `src/Fyaml.Mod` (Phase 1+): `Document`, `Node`, error results, typed
+  scalar accessors.
+- `src/FyamlStreams.Mod` (Phase 5): multi-document streams.
+- `Makefile`: build and test; see Build above.
 - `test/`: one main module per concern, plus `Check.Mod` and the YAML
   fixtures.
 - `build/`: voc/gcc output (gitignored).
@@ -118,6 +141,11 @@ which may keep pointing into it. See PLAN.md, "Buffer lifetime".
 
 ## voc / Oberon-2 facts this binding depends on (confirmed)
 
+- **`*)` ends a comment anywhere inside it**, including in text like
+  `fy_node_is_*)`. The first `FyThin` build failed on exactly that
+  (`err 41 END missing`, pointing at the comment line). Write "and
+  friends" rather than a C wildcard ending in `*` before a `)`.
+  (Inside a code procedure's C *string*, `(struct fy_node*)` is fine.)
 - **C is bound with "code procedures"**: `PROCEDURE -name(params): T
   "C expression";`. voc emits these as C *macros*, not functions, and
   a header is pulled in with `PROCEDURE -Aname '#include <libfyaml.h>';`

@@ -338,14 +338,34 @@ binary, and `_` between digits).
 Each phase ends with every test passing and running clean under
 valgrind, with findings written into this file.
 
-0. **Skeleton.** `Makefile` with a `VOC` path, `-OC` on every voc
-   invocation, `LDLIBS` from
-   pkg-config, generated files in `build/`, and `test`, `valgrind`,
-   and `clean` targets. Also `.gitignore`, `Check.Mod`, and a
-   minimal `FyThin` covering only the spike's calls. **Confirm first**
-   that voc resolves `.sym` imports when invoked from `build/` on
-   `../src/*.Mod`, since generated files land in the current
-   directory.
+0. **`[done]` Skeleton.** `Makefile` with a `VOC` path, `-OC` on
+   every voc invocation, `LDLIBS` from pkg-config, generated files in
+   `build/`, and `all`/`test`/`valgrind`/`clean` targets. Also
+   `.gitignore`, `test/Check.Mod`, and a minimal `src/FyThin.Mod`
+   covering only the spike's calls (build from string, destroy, root,
+   `fy_node_is_mapping`, by-path, get-scalar). `test/TestThin.Mod`
+   (6 checks) passes. It checks exact scalar bytes, including a
+   double-quoted `"x\0y"` scalar that keeps all 3 bytes with its
+   embedded 0X. Clean under valgrind (0 errors, nothing definitely or
+   indirectly lost). A deliberately broken check was confirmed to make
+   `make test` fail.
+
+   Found while doing it, all now in AGENTS.md:
+   - voc's symbol search path starts at `.` (`OPM.InitOptions`), so
+     running voc inside `build/` on `../src/X.Mod` finds earlier
+     modules' `.sym` there. Confirmed.
+   - voc leaves an unchanged `.sym` file untouched, so `.sym` make
+     targets recompiled on every run. The targets are the `.o` files
+     now, and a no-op `make` does nothing. Module import order has
+     to be written into the Makefile as explicit `.o` dependencies.
+   - `*)` inside a comment ends it: `(fy_node_is_*)` broke the first
+     build.
+   - `Platform.Exit` calls C `exit()` and skips `Heap.FINALL`, so
+     `Check.Summary` exits only on failure. A passing run ends
+     normally, so GC finalizers run before valgrind's leak check.
+   - Valgrind always shows one ~256 KB "still reachable" block: voc's
+     own GC heap chunk (`Heap_InitHeap`). It's harmless and already
+     left out by the chosen `--show-leak-kinds`.
 1. **Read-only parse and navigate.** `ParseString`/`ParseFile` (copy
    the input buffer from day one), `Close` plus the finalizer, `Root`,
    kind predicates (via the inline `fy_node_is_*`), `Scalar`/`ScalarLen`/
