@@ -165,6 +165,10 @@ BEGIN
   Check.Check((s = NIL) & (err.kind = Fyaml.FileError)
               & HasPrefix(err.msg, "no-such-file.yaml: error: No such file or directory"),
               "OpenFile of a missing file: NIL + FileError");
+  s := FyamlStreams.OpenFile(".", err);
+  Check.Check((s = NIL) & (err.kind = Fyaml.FileError)
+              & HasPrefix(err.msg, ".: error: Is a directory"),
+              "OpenFile of a directory: NIL + FileError, not an empty stream");
 
   (* Options *)
   Lines("a: &x 1|b: *x|", text);

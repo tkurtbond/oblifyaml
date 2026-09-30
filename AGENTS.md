@@ -121,11 +121,11 @@ exits with 246 (both confirmed live). voc refuses to compile an
 a condition that is false only at run time.
 
 Expected stderr noise: libfyaml prints some failures itself,
-bypassing the collected diagnostics. `ParseFile` checks for an
-unopenable file first, so that case is quiet, but a directory given as
-a file still prints `[ERR]: fy_parse_load_document() failed`, and so
-does a cyclic reference found while parsing with resolve on
-(`TestAnchors`). Neither is a test failure.
+bypassing the collected diagnostics. `ParseFile` and `OpenFile` check
+for an unopenable file or a directory first, so those cases are quiet,
+but a cyclic reference found while parsing with resolve on
+(`TestAnchors`) prints `[ERR]: fy_parse_load_document() failed`, and so
+does `TestStdin`. Neither is a test failure.
 
 ### Valgrind: necessary, but NOT sufficient here
 

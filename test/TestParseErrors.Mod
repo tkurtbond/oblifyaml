@@ -53,6 +53,14 @@ BEGIN
                 "missing file message gives the path and the OS reason")
   END;
 
+  (* A directory opens for reading, but isn't a file to parse. *)
+  d := Fyaml.ParseFile(".", err);
+  Check.Check((d = NIL) & (err # NIL), "a directory returns NIL and an Error");
+  IF err # NIL THEN
+    Check.Check((err.kind = Fyaml.FileError) & HasPrefix(err.msg, ".: error: Is a directory"),
+                "a directory is a FileError, Is a directory")
+  END;
+
   err := stale;  (* success must reset err to NIL *)
   d := Fyaml.ParseString("ok: 1", err);
   Check.Check((d # NIL) & (err = NIL), "valid input after failures parses, err = NIL");

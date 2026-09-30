@@ -113,7 +113,7 @@ BEGIN RETURN OpenStringWith(text, {}, err)
 END OpenString;
 
 (* A stream over the file at path. NIL and a FileError if it can't be
-   opened for reading. *)
+   opened for reading, or is a directory. *)
 PROCEDURE OpenFileWith*(path: ARRAY OF CHAR; options: SET; VAR err: Fyaml.Error): Stream;
   VAR s: Stream; p: Fyaml.String;
 BEGIN

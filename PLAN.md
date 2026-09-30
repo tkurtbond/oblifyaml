@@ -489,8 +489,9 @@ valgrind, with findings written into this file.
      nothing. `ParseFile` now `fopen`s first and returns a
      `FileError` with the OS reason
      (`no-such-file.yaml: error: No such file or directory`). A
-     directory still gets libfyaml's stderr line and a generic
-     `ParseError` naming the path.
+     directory still got libfyaml's stderr line and a generic
+     `ParseError` naming the path (fixed later: "A directory given as
+     a file").
    - **Valgrind reports uninitialised values from voc's GC**: once a GC
      runs, its conservative stack scan produces many (663,006 in
      `TestLiveness`), all in four `Heap_*` functions.
@@ -762,6 +763,26 @@ Confirmed live (a C probe under valgrind, then the tests):
   character read ahead (from `src/runtime/In.Mod`). Each would take
   input the other expects, so the two must not share stdin
   (documented, not tested).
+
+### A directory given as a file `[done]`
+
+Found through besm2_fmt's Oberon-2 port (its ADA-DIFFERENCES.md, 6.1):
+a directory opens for reading, so `Unreadable` let it through.
+`ParseFile` then got libfyaml's `[ERR]: fy_parse_load_document()
+failed` on stderr and a generic `ParseError`, and `FyamlStreams.OpenFile`
+was worse: a stream with no documents and no error, so a program read
+the directory as an empty file. alibfyaml has the same fix (its
+`3053d06`).
+
+`FyThin.OpenErrno` now also `fstat`s the opened file and returns
+`EISDIR` for a directory, so both give a `FileError`, `PATH: error: Is
+a directory`. `fstat` rather than reading a byte, which also detects a
+directory (`EISDIR` from the read), because reading would lose input
+from a pipe given as a path (`/dev/fd/N`, as from `<(...)`), which
+libfyaml opens again; confirmed with a scratch C program that the
+check gives `EISDIR` for `.`, 0 for an empty file and `/dev/null`, and
+the fopen errno otherwise. Tested in `TestParseErrors` and
+`TestStreams`.
 
 ## Open questions
 

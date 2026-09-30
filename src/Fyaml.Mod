@@ -323,9 +323,11 @@ END Build;
    Exported only because Oberon has no friend modules: these pass raw
    libfyaml handles across. Other clients should not call them. *)
 
-(* NIL if the file at path (0X-terminated) opens for reading, else a
-   FileError with the OS reason. libfyaml reports an unopenable file
-   only on stderr and collects nothing (confirmed live). *)
+(* NIL if the file at path (0X-terminated) opens for reading and isn't
+   a directory, else a FileError with the OS reason ("Is a directory"
+   for one). libfyaml reports an unopenable file only on stderr and
+   collects nothing (confirmed live), and a directory as a parse
+   failure, or, in a stream, as no documents at all. *)
 PROCEDURE Unreadable*(path: String): Error;
   VAR e: INTEGER; reason: String;
 BEGIN

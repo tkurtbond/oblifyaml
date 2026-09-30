@@ -43,6 +43,7 @@ PROCEDURE -AincludeStdlib '#include <stdlib.h>';
 PROCEDURE -AincludeString '#include <string.h>';
 PROCEDURE -AincludeStdio '#include <stdio.h>';
 PROCEDURE -AincludeErrno '#include <errno.h>';
+PROCEDURE -AincludeStat '#include <sys/stat.h>';
 
 (* ---- Documents ---- *)
 
@@ -551,14 +552,19 @@ PROCEDURE FlagModeJson*(): SYSTEM.INT32; BEGIN RETURN flagModeJson() END FlagMod
 PROCEDURE -free(p: SYSTEM.ADDRESS) "free((void*)p)";
 PROCEDURE -strlen(p: SYSTEM.ADDRESS): SYSTEM.ADDRESS "(ADDRESS)strlen((const char*)p)";
 PROCEDURE -openErrno(path: SYSTEM.ADDRESS): SYSTEM.INT32
-  '({ FILE *f_ = fopen((const char*)path, "r"); int e_ = f_ ? 0 : errno; if (f_) fclose(f_); (INT32)e_; })';
+  '({ FILE *f_ = fopen((const char*)path, "r"); int e_ = f_ ? 0 : errno; struct stat st_; if (f_) { if (fstat(fileno(f_), &st_) == 0 && S_ISDIR(st_.st_mode)) e_ = EISDIR; fclose(f_); } (INT32)e_; })';
 PROCEDURE -strerror(e: SYSTEM.INT32): SYSTEM.ADDRESS "(ADDRESS)strerror((int)e)";
 PROCEDURE -strtod(p: SYSTEM.ADDRESS): LONGREAL "(LONGREAL)strtod((const char*)p, NULL)";
 
 (* 0 if the file at path (0X-terminated) opens for reading, else the
    errno from fopen. libfyaml reports an unopenable file only on
    stderr ("[ERR]: failed to open ...") and collects nothing, so the
-   caller checks first. *)
+   caller checks first. A directory opens for reading, but libfyaml
+   then prints "[ERR]: fy_parse_load_document() failed" and ParseFile
+   gave a ParseError, while a stream found no documents and no error;
+   so a directory gives EISDIR. It is found with fstat, not by reading:
+   reading would lose input from a pipe given as a path (/dev/fd/N),
+   which libfyaml opens again. *)
 PROCEDURE OpenErrno*(path: SYSTEM.ADDRESS): SYSTEM.INT32;
 BEGIN RETURN openErrno(path)
 END OpenErrno;
