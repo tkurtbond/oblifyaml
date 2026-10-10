@@ -57,7 +57,7 @@ BEGIN
   (* stdin is now at its end *)
   again := Fyaml.ParseStdin(err);
   Check.Check((again = NIL) & (err # NIL) & (err.kind = Fyaml.ParseError), "a second ParseStdin: ParseError");
-  Check.Check((err # NIL) & Is(err.file, Fyaml.stdinName) & IsLine(err.msg, "<stdin>: error: document failed to parse"),
-              "  naming <stdin>");
+  Check.Check((err # NIL) & Is(err.file, Fyaml.stdinName) & IsLine(err.msg, "(stdin): error: document failed to parse"),
+              "  naming (stdin)");
   Check.Summary
 END TestStdin.

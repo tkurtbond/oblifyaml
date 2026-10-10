@@ -76,7 +76,7 @@ CONST
   AssertAttach* = 64;  (* node already attached, or from another document *)
 
   stringName* = "(string-in-memory)";  (* file name reported for string input *)
-  stdinName* = "<stdin>";               (* file name reported for standard input, as gcc does *)
+  stdinName* = "(stdin)";               (* file name reported for standard input, like "(string-in-memory)" *)
 
 TYPE
   String* = POINTER TO ARRAY OF CHAR;

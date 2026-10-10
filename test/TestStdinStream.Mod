@@ -55,7 +55,7 @@ BEGIN
 
   d4 := s.Next(err);
   Check.Check((d4 = NIL) & (err # NIL) & (err.kind = Fyaml.ParseError), "the malformed fourth: ParseError");
-  Check.Check((err # NIL) & HasPrefix(err.msg, "<stdin>:8:7: error: invalid multiline plain key"), "  located, and named <stdin>");
+  Check.Check((err # NIL) & HasPrefix(err.msg, "(stdin):8:7: error: invalid multiline plain key"), "  located, and named (stdin)");
   Check.Check(~s.HasNext(err) & (err = NIL), "finished after the error");
 
   s.Close; s := NIL;

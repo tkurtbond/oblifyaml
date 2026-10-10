@@ -719,14 +719,17 @@ Added after Phase 6, on request: `Fyaml.ParseStdin`/`ParseStdinWith`
 (one document, through `fy_document_build_from_fp(cfg, stdin)`) and
 `FyamlStreams.OpenStdin`/`OpenStdinWith` (every document, through
 `fy_parser_set_input_fp(fyp, name, stdin)`). Errors name the file
-`<stdin>`, as gcc does (the constant `Fyaml.stdinName`). Tests: stdin
+`(stdin)` (the constant `Fyaml.stdinName`; `<stdin>`, as gcc does,
+until 2026-10-10, when ova_fmt, which reads stdin through this binding
+and alibfyaml, settled on `(stdin)` in both, like string input's
+`(string-in-memory)`). Tests: stdin
 can be read only once per process, so there are three programs,
 `TestStdin` (7 checks), `TestStdinError` (4) and `TestStdinStream`
 (9), each fed `test/<name>.stdin`; `make test` and `make valgrind`
 redirect stdin from that file when there is one, and from `/dev/null`
 otherwise. All pass and are clean under valgrind. Controls: running
 them on `/dev/null` (a Makefile slip on the way) failed all three, and
-passing no `<stdin>` override in `ParseStdinWith` failed two
+passing no stdin-name override in `ParseStdinWith` failed two
 `TestStdinError` checks (the file read `<stream>`).
 
 Confirmed live (a C probe under valgrind, then the tests):
@@ -741,11 +744,11 @@ Confirmed live (a C probe under valgrind, then the tests):
   which is also what labels its documents' errors. Documents loaded
   from the parser don't need it once the parser is gone.
 - **`fy_document_build_from_fp` labels errors `<stream>`** (it passes
-  no name), so `ParseStdin` overrides the label with `<stdin>`, the
+  no name), so `ParseStdin` overrides the label with `(stdin)`, the
   way string input's `<memory-@...>` becomes `(string-in-memory)`.
 - **`ParseStdin` reads stdin to its end**, even past the first
   document (libfyaml reads in blocks), so a second `ParseStdin` finds
-  nothing: `<stdin>: error: document failed to parse`, with
+  nothing: `(stdin): error: document failed to parse`, with
   `[ERR]: fy_parse_load_document() failed` on stderr and nothing
   collected. That's the same result as empty input.
 - **Empty stream input trips a libfyaml bug that valgrind reports.**
@@ -756,7 +759,7 @@ Confirmed live (a C probe under valgrind, then the tests):
   `test/libfyaml.supp` suppresses exactly that error kind from that
   function, and `make valgrind` passes it alongside `voc-gc.supp`.
 - **A stream reads as documents are taken**, so documents before a
-  malformed one come back, and the error names `<stdin>` with a line
+  malformed one come back, and the error names `(stdin)` with a line
   and column.
 - libfyaml reads through C's stdio, in blocks, while voc's `In` module
   reads `Platform.StdIn` itself with `Platform.ReadBuf`, keeping one

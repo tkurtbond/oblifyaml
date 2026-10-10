@@ -146,7 +146,7 @@ a multi-document input (use `FyamlStreams` for all of them).
 
 **Standard input.** `ParseStdin(err)` (or `ParseStdinWith(options,
 err)`) parses standard input, and `FyamlStreams.OpenStdin(err)` reads
-all its documents; errors name the file `<stdin>`. `ParseStdin` reads
+all its documents; errors name the file `(stdin)`. `ParseStdin` reads
 stdin to its end, so call it once. libfyaml reads stdin through C's
 stdio, so don't also read it with voc's `In` module.
 
